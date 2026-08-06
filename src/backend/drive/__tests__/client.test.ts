@@ -59,6 +59,31 @@ describe('DriveClient', () => {
         await expect(c.getQuota()).rejects.toMatchObject({ name: 'DriveAuthError' });
     });
 
+    it('createFile multipart คำนวณ offset จาก byteLength ของ header (ชื่อไฟล์ non-ASCII ไม่เพี้ยน)', async () => {
+        let captured: { body: Uint8Array; contentType: string } | null = null;
+        stubFetch(async (_url, init) => {
+            captured = {
+                body: new Uint8Array(init?.body as Uint8Array),
+                contentType: String((init?.headers as Record<string, string>)['Content-Type']),
+            };
+            return new Response(JSON.stringify({ id: 'f1', name: 'n' }), { status: 200 });
+        });
+        const c = new DriveClient(tp);
+        const name = 'รูปภาพ-แชท.png';
+        const data = new Uint8Array([1, 2, 3, 4]);
+        await c.createFile('p', name, data);
+        const boundary = captured!.contentType.split('boundary=')[1];
+        const meta = { name, parents: ['p'] };
+        const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`;
+        const tail = `\r\n--${boundary}--`;
+        const headBytes = new TextEncoder().encode(head);
+        const tailBytes = new TextEncoder().encode(tail);
+        expect(captured!.body.byteLength).toBe(headBytes.byteLength + data.byteLength + tailBytes.byteLength);
+        // data ต้องอยู่ถัดจาก header พอดี (ไม่ถูกเขียนทับ/เว้น)
+        expect([...captured!.body.slice(headBytes.byteLength, headBytes.byteLength + data.byteLength)]).toEqual([...data]);
+        expect(new TextDecoder().decode(captured!.body.slice(-tailBytes.byteLength))).toBe(tail);
+    });
+
     it('createFolder ส่ง mimeType folder + appProperties และแนบ parentId ถ้ามี', async () => {
         const bodies: string[] = [];
         stubFetch(async (_url, init) => {

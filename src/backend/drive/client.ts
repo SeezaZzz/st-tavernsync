@@ -73,10 +73,12 @@ export class DriveClient {
             const boundary = 'tsync_' + Math.random().toString(16).slice(2);
             const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/octet-stream\r\n\r\n`;
             const tail = `\r\n--${boundary}--`;
-            const body = new Uint8Array(head.length + data.byteLength + tail.length);
-            body.set(new TextEncoder().encode(head), 0);
-            body.set(data, head.length);
-            body.set(new TextEncoder().encode(tail), head.length + data.byteLength);
+            const headBytes = new TextEncoder().encode(head);
+            const tailBytes = new TextEncoder().encode(tail);
+            const body = new Uint8Array(headBytes.byteLength + data.byteLength + tailBytes.byteLength);
+            body.set(headBytes, 0);
+            body.set(data, headBytes.byteLength);
+            body.set(tailBytes, headBytes.byteLength + data.byteLength);
             const res = await this.req(`${UPLOAD}/files?uploadType=multipart`, {
                 method: 'POST',
                 headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
