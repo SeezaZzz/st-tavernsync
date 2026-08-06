@@ -1,4 +1,4 @@
-import { ConflictError, type StorageAdapter } from './adapter';
+import { ConflictError, type RemoteSnapshot, type StorageAdapter, type StorageRevision } from './adapter';
 import type { Manifest } from '../sync-core/types';
 import { LOG_PREFIX } from '../settings';
 
@@ -31,12 +31,12 @@ export class HttpStorageAdapter implements StorageAdapter {
         return `${base}${path}`;
     }
 
-    async getManifest(): Promise<{ manifest: Manifest | null; version: number }> {
+    async getSnapshot(): Promise<RemoteSnapshot> {
         const res = await fetch(this.url('/v1/manifest'), {
             headers: authHeaders(this.opts.deviceToken),
         });
         if (res.status === 404) {
-            return { manifest: null, version: 0 };
+            return { kind: 'single', manifest: null, revision: '0' };
         }
         if (!res.ok) {
             throw new Error(`getManifest: ${res.status} ${await readError(res)}`);
@@ -44,15 +44,16 @@ export class HttpStorageAdapter implements StorageAdapter {
         const version = Number(res.headers.get('ETag')?.replace(/"/g, '') || res.headers.get('X-Manifest-Version') || 0);
         const body = await res.json() as { manifest: Manifest | null; version?: number };
         return {
+            kind: 'single',
             manifest: body.manifest,
-            version: body.version ?? version,
+            revision: String(body.version ?? version),
         };
     }
 
-    async putManifest(m: Manifest, ifVersion: number): Promise<{ version: number }> {
+    async putManifest(m: Manifest, ifRevision: StorageRevision): Promise<{ revision: StorageRevision }> {
         const res = await fetch(this.url('/v1/manifest'), {
             method: 'PUT',
-            headers: authHeaders(this.opts.deviceToken, { 'If-Match': String(ifVersion) }),
+            headers: authHeaders(this.opts.deviceToken, { 'If-Match': String(Number(ifRevision)) }),
             body: JSON.stringify(m),
         });
         if (res.status === 412) {
@@ -62,7 +63,7 @@ export class HttpStorageAdapter implements StorageAdapter {
             throw new Error(`putManifest: ${res.status} ${await readError(res)}`);
         }
         const body = await res.json() as { version: number };
-        return { version: body.version };
+        return { revision: String(body.version) };
     }
 
     async checkBlobs(hashes: string[]): Promise<string[]> {

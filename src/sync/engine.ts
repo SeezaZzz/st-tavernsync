@@ -2,7 +2,7 @@
  * Orchestrates scan → diff → plan → push/pull with optional E2EE.
  */
 
-import { ConflictError } from '../backend/adapter';
+import { ConflictError, type StorageRevision } from '../backend/adapter';
 import { HttpStorageAdapter, uploadBlobsParallel } from '../backend/http';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey, open, seal } from '../crypto';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
@@ -21,7 +21,7 @@ import { BASE_KEY, E2EE_KEY_STORAGE, getSyncStore } from '../state/store';
 export interface BaseState {
     manifest: Manifest;
     syncedAt: number;
-    remoteVersion: number;
+    remoteVersion: StorageRevision;
 }
 
 export type ConflictChoice = 'local' | 'remote' | 'both' | 'skip';
@@ -53,10 +53,12 @@ export async function clearBase(): Promise<void> {
 export async function wipeRemoteSyncData(): Promise<void> {
     const s = getSettings();
     const adapter = requireAdapter();
-    const { version } = await adapter.getManifest();
-    const empty = emptyManifest(s.deviceName || 'device', version);
+    const snap = await adapter.getSnapshot();
+    if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
+    const remoteVersion = snap.revision;
+    const empty = emptyManifest(s.deviceName || 'device', snap.manifest?.version ?? 0);
     empty.items = {};
-    const { version: next } = await adapter.putManifest(empty, version);
+    const { revision: next } = await adapter.putManifest(empty, remoteVersion);
     await saveBase({ manifest: empty, syncedAt: Date.now(), remoteVersion: next });
     s.lastStatusMessage = 'Remote wiped';
     s.lastItemCount = 0;
@@ -323,7 +325,7 @@ export async function getStatusDiff(): Promise<{
     local: Manifest;
     remote: Manifest | null;
     base: Manifest | null;
-    remoteVersion: number;
+    remoteVersion: StorageRevision;
     entries: DiffEntry[];
     summary: ReturnType<typeof summarizeDiff>;
     itemCount: number;
@@ -335,12 +337,13 @@ export async function getStatusDiff(): Promise<{
     }
 
     let remote: Manifest | null = null;
-    let remoteVersion = 0;
+    let remoteVersion: StorageRevision = '0';
     try {
         const adapter = requireAdapter();
-        const got = await adapter.getManifest();
-        remote = got.manifest;
-        remoteVersion = got.version;
+        const snap = await adapter.getSnapshot();
+        if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
+        remote = snap.manifest;
+        remoteVersion = snap.revision;
     } catch (e) {
         console.warn(LOG_PREFIX, 'Remote unavailable for status', e);
     }
@@ -466,7 +469,10 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
     const local = scanned.manifest;
 
     progress('Fetching remote manifest…');
-    let { manifest: remote, version: remoteVersion } = await adapter.getManifest();
+    const snap = await adapter.getSnapshot();
+    if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
+    let remote: Manifest | null = snap.manifest;
+    let remoteVersion: StorageRevision = snap.revision;
     const baseState = await loadBase();
 
     let entries = diffManifests(local, baseState?.manifest ?? null, remote);
@@ -698,21 +704,23 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             );
         }
 
+        const nextLogicalVersion = (remote?.version ?? 0) + 1;
         const newManifest: Manifest = {
-            ...emptyManifest(s.deviceName || 'device', remoteVersion),
+            ...emptyManifest(s.deviceName || 'device', nextLogicalVersion),
             items: newItems,
             updatedAt: Date.now(),
         };
 
         try {
-            const { version } = await adapter.putManifest(newManifest, remoteVersion);
-            await saveBase({ manifest: newManifest, syncedAt: Date.now(), remoteVersion: version });
+            const { revision } = await adapter.putManifest(newManifest, remoteVersion);
+            await saveBase({ manifest: newManifest, syncedAt: Date.now(), remoteVersion: revision });
         } catch (err) {
             if (err instanceof ConflictError) {
                 progress('412 conflict — re-diff once…');
-                const again = await adapter.getManifest();
+                const again = await adapter.getSnapshot();
+                if (again.kind !== 'single') throw new Error('fork unsupported on this backend');
                 remote = again.manifest;
-                remoteVersion = again.version;
+                remoteVersion = again.revision;
                 throw new Error('Remote changed during push; please retry');
             }
             throw err;
@@ -730,7 +738,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 }
                 await saveBase({
                     manifest: {
-                        ...(prev?.manifest || emptyManifest(s.deviceName || 'device', remoteVersion)),
+                        ...(prev?.manifest || emptyManifest(s.deviceName || 'device', remote.version)),
                         items: mergedItems,
                         updatedAt: Date.now(),
                     },

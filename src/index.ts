@@ -150,12 +150,12 @@ async function handleConnect(): Promise<void> {
         if (s.e2eeEnabled && hasE2eeKey()) {
             await syncAccountSalt();
         }
-        const { version } = await adapter.getManifest();
+        const snap = await adapter.getSnapshot();
         const quota = await adapter.quota();
         $('#tavernsync_quota_line').text(
             `Storage: ${formatBytes(quota.usedBytes)} / ${formatBytes(quota.limitBytes)} · ${quota.itemCount} files`,
         );
-        toastr.success(`Connected (v${version}).`, 'TavernSync');
+        toastr.success(`Connected (rev ${snap.revision.slice(0, 12)})`, 'TavernSync');
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Could not connect: ${String(e)}`, 'TavernSync');
