@@ -3,8 +3,9 @@
  */
 
 import { ConflictError, type StorageRevision } from '../backend/adapter';
-import { HttpStorageAdapter, uploadBlobsParallel } from '../backend/http';
-import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey, open, seal } from '../crypto';
+import { uploadBlobsParallel } from '../backend/http';
+import { requireRuntime, type BackendRuntime } from '../backend/runtime';
+import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
 import { loadBlob, loadLocalManifest, scanLocal, storeBlob } from '../st-adapter/scan';
 import { applyLocalItem, decodeUtf8Jsonl, parseItemId, writeChat } from '../st-adapter/write';
@@ -16,7 +17,7 @@ import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
 import { emptyManifest } from '../sync-core/types';
-import { BASE_KEY, E2EE_KEY_STORAGE, getSyncStore } from '../state/store';
+import { BASE_KEY, e2eeKeyStorageKey, getSyncStore } from '../state/store';
 
 export interface BaseState {
     manifest: Manifest;
@@ -29,6 +30,27 @@ export type ConflictChoice = 'local' | 'remote' | 'both' | 'skip';
 let sessionKey: CryptoKey | null = null;
 let sessionPassphrase: string | null = null;
 let generating = false;
+/** storageNamespace ของ runtime ล่าสุด — ใช้ต่อ remembered key storage */
+let currentNamespace = '';
+
+export function getSessionKey(): CryptoKey | null {
+    return sessionKey;
+}
+
+/** HTTP namespace จาก settings โดยตรง — ใช้ตอนยังไม่มี runtime (เช่น tryRestoreE2eeKey ตอน load) */
+function httpNamespaceFromSettings(): string {
+    const endpoint = getSettings().endpoint.trim();
+    if (!endpoint) return 'http:';
+    try {
+        return `http:${new URL(endpoint).host}`;
+    } catch {
+        return 'http:';
+    }
+}
+
+function rememberedKeyStorageKey(): string {
+    return e2eeKeyStorageKey(currentNamespace || httpNamespaceFromSettings());
+}
 
 export function setGenerationBusy(busy: boolean): void {
     generating = busy;
@@ -52,7 +74,9 @@ export async function clearBase(): Promise<void> {
 
 export async function wipeRemoteSyncData(): Promise<void> {
     const s = getSettings();
-    const adapter = requireAdapter();
+    const rt = await requireRuntime();
+    currentNamespace = rt.storageNamespace;
+    const adapter = rt.storage;
     const snap = await adapter.getSnapshot();
     if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
     const remoteVersion = snap.revision;
@@ -82,15 +106,15 @@ function b64decode(s: string): Uint8Array {
 async function persistRememberedKey(key: CryptoKey): Promise<void> {
     const s = getSettings();
     if (s.e2eeRequireSessionUnlock) {
-        await getSyncStore().removeItem(E2EE_KEY_STORAGE);
+        await getSyncStore().removeItem(rememberedKeyStorageKey());
         return;
     }
     const raw = await exportKeyRaw(key);
-    await getSyncStore().setItem(E2EE_KEY_STORAGE, b64encode(raw));
+    await getSyncStore().setItem(rememberedKeyStorageKey(), b64encode(raw));
 }
 
 async function clearRememberedKey(): Promise<void> {
-    await getSyncStore().removeItem(E2EE_KEY_STORAGE);
+    await getSyncStore().removeItem(rememberedKeyStorageKey());
 }
 
 /**
@@ -104,7 +128,7 @@ export async function tryRestoreE2eeKey(): Promise<boolean> {
     if (s.e2eeRequireSessionUnlock) return false;
 
     try {
-        const b64 = await getSyncStore().getItem<string>(E2EE_KEY_STORAGE);
+        const b64 = await getSyncStore().getItem<string>(rememberedKeyStorageKey());
         if (!b64) return false;
         sessionKey = await importAesKey(b64decode(b64));
         console.log(LOG_PREFIX, 'Restored remembered E2EE key for this device');
@@ -125,7 +149,8 @@ export async function syncAccountSalt(passphrase?: string): Promise<void> {
     if (!s.e2eeEnabled) return;
     if (!s.endpoint.trim() || !s.deviceToken.trim()) return;
 
-    const adapter = requireAdapter();
+    const rt = await requireRuntime();
+    currentNamespace = rt.storageNamespace;
     let localSalt = s.e2eeSalt;
     if (!localSalt) {
         // Need a salt to publish — create one if unlocking
@@ -136,7 +161,7 @@ export async function syncAccountSalt(passphrase?: string): Promise<void> {
         saveSettings();
     }
 
-    const canonical = await adapter.ensureAccountSalt(localSalt);
+    const canonical = encodeSalt(await rt.saltProvider.ensureSalt(decodeSalt(localSalt)));
     if (canonical !== s.e2eeSalt) {
         console.warn(LOG_PREFIX, 'Adopting account E2EE salt from server (was device-local)');
         s.e2eeSalt = canonical;
@@ -164,10 +189,11 @@ export async function unlockE2ee(passphrase: string): Promise<void> {
     // Prefer account salt from server when available
     if (s.endpoint.trim() && s.deviceToken.trim()) {
         try {
-            const adapter = requireAdapter();
-            const { e2eeSalt } = await adapter.getAccount();
-            if (e2eeSalt) {
-                s.e2eeSalt = e2eeSalt;
+            const rt = await requireRuntime();
+            currentNamespace = rt.storageNamespace;
+            const salt = await rt.saltProvider.getSalt();
+            if (salt) {
+                s.e2eeSalt = encodeSalt(salt);
                 saveSettings();
             }
         } catch (e) {
@@ -250,66 +276,14 @@ function scopeTypeSet(scope: SyncScopeSettings): Set<string> {
     return set;
 }
 
-function requireAdapter(): HttpStorageAdapter {
-    const s = getSettings();
-    if (!s.endpoint.trim()) throw new Error('No endpoint configured');
-    if (!s.deviceToken.trim()) throw new Error('No device token configured');
-    return new HttpStorageAdapter({ endpoint: s.endpoint.trim(), deviceToken: s.deviceToken.trim() });
-}
-
-/**
- * R2 object key = plaintext content hash.
- * Body may still be AES-GCM ciphertext when E2EE is on.
- * (HMAC keys were dropped — per-device salts caused cross-device 404s.)
- */
-async function blobStorageKey(plaintextHash: string): Promise<string> {
-    return plaintextHash;
-}
-
-async function getRemoteBlob(adapter: HttpStorageAdapter, plaintextHash: string): Promise<Uint8Array> {
-    const key = await blobStorageKey(plaintextHash);
-    return adapter.getBlob(key);
+async function getRemoteBlob(rt: BackendRuntime, plaintextHash: string): Promise<Uint8Array> {
+    const key = await rt.crypto.blobNameFor(plaintextHash);
+    return rt.storage.getBlob(key);
 }
 
 function isBlobMissingError(e: unknown): boolean {
     const msg = e instanceof Error ? e.message : String(e);
     return /\b404\b/.test(msg) || /not.?found/i.test(msg);
-}
-
-async function maybeEncrypt(bytes: Uint8Array): Promise<Uint8Array> {
-    const s = getSettings();
-    if (!s.e2eeEnabled) return bytes;
-    if (!sessionKey) throw new Error('E2EE enabled but no key on this device — enter passphrase once');
-    return seal(sessionKey, bytes);
-}
-
-async function maybeDecrypt(bytes: Uint8Array, expectedHash: string): Promise<Uint8Array> {
-    const s = getSettings();
-    if (!s.e2eeEnabled) {
-        const hash = await sha256Hex(bytes);
-        if (hash !== expectedHash) {
-            throw new Error(`Blob hash mismatch: expected ${expectedHash}, got ${hash}`);
-        }
-        return bytes;
-    }
-    if (!sessionKey) throw new Error('E2EE enabled but no key on this device — enter passphrase once');
-
-    try {
-        const plain = await open(sessionKey, bytes);
-        const hash = await sha256Hex(plain);
-        if (hash !== expectedHash) {
-            throw new Error(`Blob hash mismatch: expected ${expectedHash}, got ${hash}`);
-        }
-        return plain;
-    } catch (decryptErr) {
-        // Older pushes may have stored plaintext under the same content hash (E2EE off → on).
-        const asPlainHash = await sha256Hex(bytes);
-        if (asPlainHash === expectedHash) {
-            console.warn(LOG_PREFIX, 'Blob was plaintext; accepting despite E2EE on', expectedHash.slice(0, 12));
-            return bytes;
-        }
-        throw decryptErr;
-    }
 }
 
 export async function runScan(onProgress?: (m: string) => void) {
@@ -339,7 +313,9 @@ export async function getStatusDiff(): Promise<{
     let remote: Manifest | null = null;
     let remoteVersion: StorageRevision = '0';
     try {
-        const adapter = requireAdapter();
+        const rt = await requireRuntime();
+        currentNamespace = rt.storageNamespace;
+        const adapter = rt.storage;
         const snap = await adapter.getSnapshot();
         if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
         remote = snap.manifest;
@@ -409,15 +385,15 @@ async function resolveChatConflict(
     id: string,
     localHash: string,
     remoteHash: string,
-    adapter: HttpStorageAdapter,
+    rt: BackendRuntime,
 ): Promise<'local' | 'remote' | 'both' | 'fast_forward_local' | 'fast_forward_remote'> {
     let localBytes = await loadBlob(localHash);
     if (!localBytes || localBytes.byteLength === 0) {
         // re-scan needed; treat as both
         return 'both';
     }
-    const remoteBoxed = await getRemoteBlob(adapter, remoteHash);
-    const remoteBytes = await maybeDecrypt(remoteBoxed, remoteHash);
+    const remoteBoxed = await getRemoteBlob(rt, remoteHash);
+    const remoteBytes = await rt.crypto.decryptBlob(remoteBoxed, remoteHash);
     const localMsgs = decodeUtf8Jsonl(localBytes);
     const remoteMsgs = decodeUtf8Jsonl(remoteBytes);
     const ff = tryChatFastForward(localMsgs, remoteMsgs);
@@ -458,7 +434,9 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             throw new Error('E2EE enabled but no key on this device — enter passphrase once');
         }
     }
-    const adapter = requireAdapter();
+    const rt = await requireRuntime();
+    currentNamespace = rt.storageNamespace;
+    const adapter = rt.storage;
     const progress = (m: string) => {
         opts.onProgress?.(m);
         console.log(LOG_PREFIX, m);
@@ -483,7 +461,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         if (e.action !== 'conflict' || e.type !== 'chat') continue;
         if (!e.local || !e.remote) continue;
         try {
-            const decision = await resolveChatConflict(e.id, e.local.hash, e.remote.hash, adapter);
+            const decision = await resolveChatConflict(e.id, e.local.hash, e.remote.hash, rt);
             if (decision === 'fast_forward_remote') {
                 e.action = 'pull';
             } else if (decision === 'fast_forward_local') {
@@ -503,8 +481,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             // Field-level merge attempt
             try {
                 const localBytes = await loadBlob(e.local.hash);
-                const remoteBoxed = await getRemoteBlob(adapter, e.remote.hash);
-                const remoteBytes = await maybeDecrypt(remoteBoxed, e.remote.hash);
+                const remoteBoxed = await getRemoteBlob(rt, e.remote.hash);
+                const remoteBytes = await rt.crypto.decryptBlob(remoteBoxed, e.remote.hash);
                 const localObj = JSON.parse(new TextDecoder().decode(localBytes!)) as Record<string, unknown>;
                 const remoteObj = JSON.parse(new TextDecoder().decode(remoteBytes)) as Record<string, unknown>;
                 let baseObj: Record<string, unknown> | null = null;
@@ -583,14 +561,14 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             if (!data || data.byteLength === 0) {
                 throw new Error(`Missing local blob for ${id} (${hash})`);
             }
-            data = await maybeEncrypt(data);
-            const key = await blobStorageKey(hash);
+            data = await rt.crypto.encryptBlob(data);
+            const key = await rt.crypto.blobNameFor(hash);
             await uploadBlobsParallel(adapter, [{ hash: key, data }]);
         },
         pullAndApply: async (id, type, hash) => {
             let boxed: Uint8Array;
             try {
-                boxed = await getRemoteBlob(adapter, hash);
+                boxed = await getRemoteBlob(rt, hash);
             } catch (e) {
                 if (isBlobMissingError(e)) {
                     pullSkipped++;
@@ -605,7 +583,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             }
             let plain: Uint8Array;
             try {
-                plain = await maybeDecrypt(boxed, hash);
+                plain = await rt.crypto.decryptBlob(boxed, hash);
             } catch (e) {
                 pullSkipped++;
                 console.error(LOG_PREFIX, `Skipping pull ${id}: decrypt/hash failed`, e);
@@ -635,8 +613,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             const sibling = conflictSiblingId(id, s.deviceName || 'remote');
             let plain: Uint8Array;
             try {
-                const boxed = await getRemoteBlob(adapter, entry.remote.hash);
-                plain = await maybeDecrypt(boxed, entry.remote.hash);
+                const boxed = await getRemoteBlob(rt, entry.remote.hash);
+                plain = await rt.crypto.decryptBlob(boxed, entry.remote.hash);
             } catch (e) {
                 console.error(LOG_PREFIX, 'keep_both: could not fetch remote', id, e);
                 toastr.warning(
@@ -681,17 +659,12 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             }
         }
 
-        // Drop entries whose blobs are missing under both HMAC key and plaintext hash
+        // Drop entries whose blobs are missing under the backend's blob name
         const dropped: string[] = [];
         for (const [id, item] of Object.entries(newItems)) {
-            const keyed = await blobStorageKey(item.hash);
-            const missing = await adapter.checkBlobs(
-                keyed === item.hash ? [item.hash] : [keyed, item.hash],
-            );
-            const hasBlob = keyed === item.hash
-                ? !missing.includes(item.hash)
-                : !(missing.includes(keyed) && missing.includes(item.hash));
-            if (!hasBlob) {
+            const keyed = await rt.crypto.blobNameFor(item.hash);
+            const missing = await adapter.checkBlobs([keyed]);
+            if (missing.includes(keyed)) {
                 delete newItems[id];
                 dropped.push(id);
             }
