@@ -12,7 +12,8 @@
 /out
 /build
 
-/docs
+/docs/*
+!/docs/superpowers/
 
 # misc
 .DS_Store
