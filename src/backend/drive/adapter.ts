@@ -1,8 +1,17 @@
 // src/backend/drive/adapter.ts
-import type { StorageAdapter, RemoteSnapshot, StorageRevision } from '../adapter';
+import { ConflictError, type StorageAdapter, type RemoteSnapshot, type StorageRevision } from '../adapter';
 import type { Manifest } from '../../sync-core/types';
 import type { BackendCrypto } from '../runtime';
 import { DriveClient, DriveFileMeta } from './client';
+import {
+    COMMIT_ID_LEN,
+    MAX_PARENTS,
+    computeHeads,
+    findCommonAncestor,
+    parseCommitMeta,
+    revisionOfHeads,
+    type CommitMeta,
+} from './commits';
 
 export interface DriveLayout { rootId: string; manifestsId: string; blobsId: string; }
 
@@ -65,7 +74,58 @@ export class DriveAdapter implements StorageAdapter {
         return { ...q, itemCount: blobs.length };
     }
 
-    // Task 6 จะ implement จริง
-    async getSnapshot(): Promise<RemoteSnapshot> { throw new Error('not implemented (Task 6)'); }
-    async putManifest(_m: Manifest, _r: StorageRevision): Promise<{ revision: StorageRevision }> { throw new Error('not implemented (Task 6)'); }
+    private async listCommits(): Promise<CommitMeta[]> {
+        const files = await this.client.listChildren(this.layout.manifestsId);
+        return files
+            .filter(f => f.appProperties?.ts === 'commit-v1' && f.name.endsWith('.enc'))
+            .map(parseCommitMeta);
+    }
+
+    private async loadCommitManifest(c: CommitMeta): Promise<Manifest> {
+        const data = await this.client.getFileData(c.id);
+        return this.crypto.decodeManifest(data);
+    }
+
+    async getSnapshot(): Promise<RemoteSnapshot> {
+        const commits = await this.listCommits();
+        const heads = computeHeads(commits);
+        if (heads.length === 0) return { kind: 'single', manifest: null, revision: '0' };
+        const revision = await revisionOfHeads(heads);
+        if (heads.length === 1) {
+            return { kind: 'single', manifest: await this.loadCommitManifest(heads[0]), revision };
+        }
+        // fork: โหลด manifest ทุก head + หา common ancestor ของ head คู่แรก (N>2 ให้ engine merge ทีละก้อน)
+        const headManifests = await Promise.all(heads.map(async h => ({ commitId: h.commitId, manifest: await this.loadCommitManifest(h) })));
+        const anc = findCommonAncestor(heads[0], heads[1], commits);
+        const commonAncestor = anc ? await this.loadCommitManifest(anc) : null;
+        return { kind: 'fork', heads: headManifests, commonAncestor, revision };
+    }
+
+    async putManifest(m: Manifest, ifRevision: StorageRevision): Promise<{ revision: StorageRevision }> {
+        const commits = await this.listCommits();
+        let heads = computeHeads(commits);
+        const current = heads.length ? await revisionOfHeads(heads) : '0';
+        if (current !== ifRevision) throw new ConflictError();
+
+        const data = await this.crypto.encodeManifest(m);
+        // ถ้า heads > MAX_PARENTS: สร้าง merge commit กลางเป็นลำดับ (manifest เดียวกัน) จนเหลือ ≤4 parents
+        while (heads.length > MAX_PARENTS) {
+            const group = heads.slice(0, MAX_PARENTS);
+            const parents = group.map(h => h.commitId);
+            const { fileId, commitId } = await this.writeCommit(data, parents);
+            heads = [{ id: fileId, commitId, parents, createdTime: '' }, ...heads.slice(MAX_PARENTS)];
+        }
+        const { commitId } = await this.writeCommit(data, heads.map(h => h.commitId));
+        return { revision: await revisionOfHeads([{ id: '', commitId, parents: [], createdTime: '' }]) };
+    }
+
+    /** สร้าง commit ไฟล์ใหม่; คืนทั้ง Drive file id และ commitId (32 hex จาก SHA-256 ของ ciphertext) */
+    private async writeCommit(data: Uint8Array, parents: string[]): Promise<{ fileId: string; commitId: string }> {
+        const digest = await crypto.subtle.digest('SHA-256', data as BufferSource);
+        const commitId = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, COMMIT_ID_LEN);
+        const appProperties: Record<string, string> = { ts: 'commit-v1' };
+        parents.slice(0, MAX_PARENTS).forEach((p, i) => { appProperties[`p${i}`] = p; });
+        const created = await this.client.createFile(this.layout.manifestsId, `${commitId}.enc`, data, appProperties);
+        return { fileId: created.id, commitId };
+    }
 }

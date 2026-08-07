@@ -277,8 +277,8 @@ function scopeTypeSet(scope: SyncScopeSettings): Set<string> {
 }
 
 async function getRemoteBlob(rt: BackendRuntime, plaintextHash: string): Promise<Uint8Array> {
-    const key = await rt.crypto.blobNameFor(plaintextHash);
-    return rt.storage.getBlob(key);
+    // engine ส่ง logical content hash เสมอ — adapter แปลงเป็น blob name เอง
+    return rt.storage.getBlob(plaintextHash);
 }
 
 function isBlobMissingError(e: unknown): boolean {
@@ -562,8 +562,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 throw new Error(`Missing local blob for ${id} (${hash})`);
             }
             data = await rt.crypto.encryptBlob(data);
-            const key = await rt.crypto.blobNameFor(hash);
-            await uploadBlobsParallel(adapter, [{ hash: key, data }]);
+            await uploadBlobsParallel(adapter, [{ hash, data }]);
         },
         pullAndApply: async (id, type, hash) => {
             let boxed: Uint8Array;
@@ -662,9 +661,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         // Drop entries whose blobs are missing under the backend's blob name
         const dropped: string[] = [];
         for (const [id, item] of Object.entries(newItems)) {
-            const keyed = await rt.crypto.blobNameFor(item.hash);
-            const missing = await adapter.checkBlobs([keyed]);
-            if (missing.includes(keyed)) {
+            const missing = await adapter.checkBlobs([item.hash]);
+            if (missing.includes(item.hash)) {
                 delete newItems[id];
                 dropped.push(id);
             }
