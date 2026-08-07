@@ -47,15 +47,32 @@ export async function discoverDriveLayout(client: DriveClient, knownFolderId?: s
 }
 
 export class DriveAdapter implements StorageAdapter {
+    /** listing ของ blobs/ ต่อ adapter instance (instance ถูกสร้างใหม่ทุก sync ผ่าน requireRuntime)
+     *  — กัน full-folder listing ซ้ำทุก checkBlobs (uploadBlobsParallel เรียกทีละ item) */
+    private blobsListing: Promise<Set<string>> | null = null;
+
     constructor(
         private client: DriveClient,
         private crypto: BackendCrypto,
         private layout: DriveLayout,
     ) {}
 
+    private listBlobNames(): Promise<Set<string>> {
+        if (!this.blobsListing) {
+            this.blobsListing = this.client.listChildren(this.layout.blobsId)
+                .then(files => new Set(files.map(f => f.name)))
+                .catch(err => { this.blobsListing = null; throw err; });
+        }
+        return this.blobsListing;
+    }
+
+    /** ล้าง listing cache — GC เรียกหลัง trash blobs */
+    invalidateBlobsCache(): void {
+        this.blobsListing = null;
+    }
+
     async checkBlobs(hashes: string[]): Promise<string[]> {
-        const files = await this.client.listChildren(this.layout.blobsId);
-        const have = new Set(files.map(f => f.name));
+        const have = await this.listBlobNames();
         const missing: string[] = [];
         for (const h of hashes) {
             if (!have.has(await this.crypto.blobNameFor(h))) missing.push(h);
@@ -74,6 +91,7 @@ export class DriveAdapter implements StorageAdapter {
         const name = await this.crypto.blobNameFor(hash);
         if (await this.client.findChildByName(this.layout.blobsId, name)) return; // content-addressed: มีแล้วข้าม
         await this.client.createFile(this.layout.blobsId, name, data);
+        (await this.blobsListing)?.add(name); // อัปเดต cache ให้ตรงกับของที่เพิ่งอัปโหลด
     }
 
     async quota(): Promise<{ usedBytes: number; limitBytes: number; itemCount: number }> {

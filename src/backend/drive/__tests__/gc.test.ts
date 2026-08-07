@@ -14,7 +14,7 @@ const cryptoStub: BackendCrypto = {
 };
 
 const layout: DriveLayout = { rootId: 'r', manifestsId: 'm', blobsId: 'b' };
-const adapterStub = {} as DriveAdapter; // GC ใช้ client/layout/crypto โดยตรง — adapter ไม่ถูกแตะ
+const adapterStub = { invalidateBlobsCache: () => {} } as DriveAdapter; // GC ใช้ client/layout/crypto โดยตรง — adapter แตะเฉพาะ cache invalidation
 
 const DAY = 24 * 60 * 60 * 1000;
 const isoDaysAgo = (days: number) => new Date(Date.now() - days * DAY).toISOString();

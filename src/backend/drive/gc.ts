@@ -55,6 +55,7 @@ export async function collectGarbage(
             trashedBlobs++;
         }
     }
+    if (trashedBlobs > 0) adapter.invalidateBlobsCache();
 
     // trash commits เกิน retain
     let trashedCommits = 0;

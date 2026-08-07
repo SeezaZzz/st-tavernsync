@@ -34,6 +34,22 @@ describe('DriveAdapter blobs', () => {
         expect(client.listChildren).toHaveBeenCalledWith('b');
     });
 
+    it('listing ของ blobs/ cache ต่อ instance — checkBlobs หลายครั้ง list ครั้งเดียว', async () => {
+        const client = clientStub([{ id: 'f1', name: 'hmac_aaa' }]);
+        const a = new DriveAdapter(client, cryptoStub, layout);
+        expect(await a.checkBlobs(['aaa', 'bbb'])).toEqual(['bbb']);
+        expect(await a.checkBlobs(['ccc'])).toEqual(['ccc']);
+        expect(client.listChildren).toHaveBeenCalledTimes(1);
+        // putBlob อัปเดต cache — checkBlobs ถัดไปเห็น blob ใหม่โดยไม่ list ซ้ำ
+        await a.putBlob('bbb', new Uint8Array([1]));
+        expect(await a.checkBlobs(['bbb'])).toEqual([]);
+        expect(client.listChildren).toHaveBeenCalledTimes(1);
+        // invalidate (GC) → list ใหม่
+        a.invalidateBlobsCache();
+        await a.checkBlobs(['bbb']);
+        expect(client.listChildren).toHaveBeenCalledTimes(2);
+    });
+
     it('putBlob ข้ามถ้ามีไฟล์ชื่อเดียวกันอยู่แล้ว', async () => {
         const client = clientStub([{ id: 'f1', name: 'hmac_aaa' }]);
         const a = new DriveAdapter(client, cryptoStub, layout);

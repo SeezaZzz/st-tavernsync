@@ -2,7 +2,7 @@
  * Orchestrates scan → diff → plan → push/pull with optional E2EE.
  */
 
-import { ConflictError, type StorageRevision } from '../backend/adapter';
+import { ConflictError, manifestVersionForPush, type StorageRevision } from '../backend/adapter';
 import { uploadBlobsParallel } from '../backend/http';
 import { requireRuntime, type BackendRuntime } from '../backend/runtime';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
@@ -725,10 +725,11 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         }
 
         // Drop entries whose blobs are missing under the backend's blob name
+        // (batch เช็กครั้งเดียว — HTTP endpoint รับ array อยู่แล้ว, Drive จะได้ list โฟลเดอร์รอบเดียว)
         const dropped: string[] = [];
+        const missingSet = new Set(await adapter.checkBlobs(Object.values(newItems).map(i => i.hash)));
         for (const [id, item] of Object.entries(newItems)) {
-            const missing = await adapter.checkBlobs([item.hash]);
-            if (missing.includes(item.hash)) {
+            if (missingSet.has(item.hash)) {
                 delete newItems[id];
                 dropped.push(id);
             }
@@ -741,9 +742,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             );
         }
 
-        const nextLogicalVersion = (remote?.version ?? 0) + 1;
         const newManifest: Manifest = {
-            ...emptyManifest(s.deviceName || 'device', nextLogicalVersion),
+            ...emptyManifest(s.deviceName || 'device', manifestVersionForPush(remoteVersion, remote)),
             items: newItems,
             updatedAt: Date.now(),
         };
