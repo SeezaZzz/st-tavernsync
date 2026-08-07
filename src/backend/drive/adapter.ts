@@ -89,9 +89,14 @@ export class DriveAdapter implements StorageAdapter {
 
     async putBlob(hash: string, data: Uint8Array): Promise<void> {
         const name = await this.crypto.blobNameFor(hash);
-        if (await this.client.findChildByName(this.layout.blobsId, name)) return; // content-addressed: มีแล้วข้าม
+        // dedup จาก listing ที่ cache ไว้ ไม่ใช่ findChildByName ต่อไฟล์ —
+        // การถามทีละไฟล์เพิ่ม round-trip หนึ่งครั้งต่อ blob ซึ่งบน Drive คือครึ่งหนึ่งของเวลาอัปโหลด
+        // ปกติ uploadBlobsParallel เรียก checkBlobs() มาก่อน cache จึงอุ่นอยู่แล้ว (0 คำขอเพิ่ม);
+        // ถ้าถูกเรียกเดี่ยว ๆ listBlobNames() จะ list ครั้งเดียวแล้ว cache ไว้ ยังกันซ้ำได้เหมือนเดิม
+        const have = await this.listBlobNames();
+        if (have.has(name)) return;
         await this.client.createFile(this.layout.blobsId, name, data);
-        (await this.blobsListing)?.add(name); // อัปเดต cache ให้ตรงกับของที่เพิ่งอัปโหลด
+        have.add(name); // อัปเดต cache ให้ตรงกับของที่เพิ่งอัปโหลด
     }
 
     async quota(): Promise<{ usedBytes: number; limitBytes: number; itemCount: number }> {
