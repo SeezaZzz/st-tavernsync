@@ -43,6 +43,14 @@ function getCtx() {
     return SillyTavern.getContext();
 }
 
+/**
+ * Client ID กลางของ TavernSync — ผู้ใช้ไม่ต้องสร้างเอง กด Connect ได้เลย
+ * ว่างไว้จนกว่าผู้พัฒนาจะสร้าง OAuth Client ID จาก Google Cloud project ของ TavernSync
+ * (Web application, origin ครบ, ผ่านการ verify หรืออยู่โหมด Testing) แล้วมาใส่ตรงนี้
+ * เมื่อมีค่า ช่อง Client ID ในแผงจะถูกเติมให้อัตโนมัติ (ผู้ใช้แก้เองได้ถ้าอยากใช้ของตัวเอง)
+ */
+const BUILTIN_DRIVE_CLIENT_ID = '';
+
 function setStatusLine(text: string): void {
     const el = document.getElementById('tavernsync_status_line');
     if (el) {
@@ -112,6 +120,10 @@ function hydrateSettingsUI(): void {
     $('#tavernsync_endpoint').val(s.endpoint);
     $('#tavernsync_device_name').val(s.deviceName);
     $('#tavernsync_device_token').val(s.deviceToken);
+    if (!s.driveClientId && BUILTIN_DRIVE_CLIENT_ID) {
+        s.driveClientId = BUILTIN_DRIVE_CLIENT_ID;
+        saveSettings();
+    }
     $('#tavernsync_client_id').val(s.driveClientId);
 
     $('#tavernsync_scope_settings').prop('checked', s.scope.settings);

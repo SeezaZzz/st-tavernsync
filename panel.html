@@ -49,7 +49,12 @@
             <div id="tavernsync_drive_fields" style="display:none">
                 <label>Google Client ID</label>
                 <input id="tavernsync_client_id" type="text" class="text_pole" placeholder="xxxx.apps.googleusercontent.com" />
-                <small>สร้างเองที่ Google Cloud Console — ดูคู่มือใน docs/google-drive-setup.md (ทุกเครื่องต้องใช้ Client ID เดียวกัน)</small>
+                <small class="tavernsync-hint">
+                    ยังไม่มี Client ID? <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">เปิด Google Cloud Console</a> แล้วทำ 4 ขั้นนี้ (~10 นาที ทำครั้งเดียว):
+                    ① สร้าง project ใหม่ (ชื่ออะไรก็ได้) → ② ที่ APIs &amp; Services → Library ค้นหา <b>Google Drive API</b> แล้วกด Enable → ③ ที่ OAuth consent screen เลือก External ใส่ชื่อแอป แล้ว<b>เพิ่มอีเมลตัวเองใน Test users</b> → ④ ที่ Credentials → Create Credentials → OAuth client ID เลือก <b>Web application</b> ช่อง Authorized JavaScript origins ใส่ที่อยู่ที่เปิด SillyTavern ให้ตรงเป๊ะ (เช่น <code>http://localhost:8000</code> — ดูจาก address bar) แล้วก็อปปี้ Client ID มาวางช่องนี้
+                    · <a href="https://github.com/SICout9010/st-tavernsync/blob/master/docs/google-drive-setup.md" target="_blank" rel="noopener">คู่มือฉบับเต็มพร้อมรายละเอียด</a>
+                    · <b>ทุกเครื่องต้องใช้ Client ID เดียวกัน</b>
+                </small>
                 <div class="tavernsync_row">
                     <div id="tavernsync_google_connect" class="menu_button">Connect Google</div>
                     <div id="tavernsync_google_disconnect" class="menu_button">Disconnect</div>
