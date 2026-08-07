@@ -31,7 +31,9 @@ export type ConflictChoice = 'local' | 'remote' | 'both' | 'skip';
 
 let sessionKey: CryptoKey | null = null;
 let sessionPassphrase: string | null = null;
-let generating = false;
+/** เวลาที่เริ่ม generate (ms epoch) — 0 = ว่าง
+ *  เก็บเป็น timestamp แทน boolean เพื่อให้ล็อกปลดตัวเองได้ถ้าอีเวนต์ "จบ" หายไป */
+let generatingSince = 0;
 /** storageNamespace ของ runtime ล่าสุด — ใช้ต่อ remembered key storage */
 let currentNamespace = '';
 
@@ -64,12 +66,21 @@ function rememberedKeyStorageKey(): string {
     return e2eeKeyStorageKey(currentNamespace || namespaceFromSettings());
 }
 
+/** เพดานเวลาล็อก — generation เดียวไม่ควรนานเกินนี้ ถ้าเกินแปลว่าอีเวนต์ "จบ" หายไป */
+const GENERATION_LOCK_MAX_MS = 5 * 60_000;
+
 export function setGenerationBusy(busy: boolean): void {
-    generating = busy;
+    generatingSince = busy ? Date.now() : 0;
 }
 
 export function isGenerationBusy(): boolean {
-    return generating;
+    if (!generatingSince) return false;
+    if (Date.now() - generatingSince >= GENERATION_LOCK_MAX_MS) {
+        // ST ไม่ยิงอีเวนต์จบมา (path ใหม่/บั๊ก) — ปลดล็อกเองแทนที่จะค้างถาวร
+        generatingSince = 0;
+        return false;
+    }
+    return true;
 }
 
 export async function loadBase(): Promise<BaseState | null> {
@@ -468,6 +479,10 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         opts.onProgress?.(m);
         console.log(LOG_PREFIX, m);
     };
+    /** อัปเดตเฉพาะ UI ไม่แตะ console — ใช้กับตัวนับรายชิ้นที่ยิงหลักพันครั้ง */
+    const progressUi = (m: string) => opts.onProgress?.(m);
+    const opVerb =
+        opts.direction === 'push' ? 'Pushing' : opts.direction === 'pull' ? 'Pulling' : 'Syncing';
 
     progress('Scanning local…');
     const scanned = await runScan(progress);
@@ -622,6 +637,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
     await applyOp(plan, {
         dryRun: !!opts.dryRun,
         log: (msg, meta) => console.log(LOG_PREFIX, msg, meta ?? ''),
+        onProgress: (processed, total) => progressUi(`${opVerb} ${processed}/${total}…`),
         pushBlob: async (id, hash) => {
             let data = await loadBlob(hash);
             if (!data || data.byteLength === 0) {

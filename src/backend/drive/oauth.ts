@@ -35,8 +35,11 @@ export class GisTokenProvider implements DriveTokenProvider {
     private token: string | null = null;
     private expiresAt = 0;
     private client: GisTokenClient | null = null;
-    /** memoize request ที่ค้างอยู่ — getToken พร้อมกันหลาย call แชร์ request เดียว */
+    /** memoize request เงียบที่ค้างอยู่ — getToken พร้อมกันหลาย call แชร์ request เดียว */
     private inflight: Promise<string> | null = null;
+    /** แยกจาก inflight โดยตั้งใจ — Connect ต้องไม่ไปเกาะ silent request ที่กำลังจะ timeout
+     *  ไม่งั้นกด Connect แล้วได้ promise เงียบตัวเก่าแทนที่จะเปิด popup ทันทีในจังหวะ user gesture */
+    private inflightInteractive: Promise<string> | null = null;
 
     constructor(
         private clientId: string,
@@ -62,14 +65,14 @@ export class GisTokenProvider implements DriveTokenProvider {
      *  ถ้าเคยแล้วเหลือแค่เลือกบัญชีคลิกเดียว (ไม่ต้องยินยอม scope ซ้ำ) */
     async getTokenInteractive(): Promise<string> {
         if (this.token && Date.now() < this.expiresAt - 30_000) return this.token;
-        if (this.inflight) return this.inflight;
+        if (this.inflightInteractive) return this.inflightInteractive;
         // ใช้ popup implicit flow ของเราเอง ไม่ผ่าน GIS iframe — GIS callback หายเงียบ ๆ
         // ในบางเบราว์เซอร์ (3p storage ถูกบล็อก) ทำให้ Connect ค้างทั้งที่ผู้ใช้ consent สำเร็จแล้ว
-        this.inflight = this.requestViaPopup('select_account');
+        this.inflightInteractive = this.requestViaPopup('select_account');
         try {
-            return await this.inflight;
+            return await this.inflightInteractive;
         } finally {
-            this.inflight = null;
+            this.inflightInteractive = null;
         }
     }
 

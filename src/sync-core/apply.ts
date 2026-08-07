@@ -8,6 +8,9 @@ export interface ApplyContext {
     pullAndApply: (id: string, type: ApplyOp['type'], hash: string) => Promise<void>;
     keepBoth: (id: string, type: ApplyOp['type']) => Promise<void>;
     tombstone: (id: string) => Promise<void>;
+    /** ยิงหลังจบแต่ละ op — ใช้โชว์ n/total บน UI
+     *  อย่าเขียน console ใน callback นี้ แผนใหญ่ ๆ มีหลักพัน op จะท่วมคอนโซล */
+    onProgress?: (processed: number, total: number) => void;
 }
 
 /**
@@ -61,10 +64,18 @@ export async function applyOp(ops: ApplyOp[], ctx: ApplyContext): Promise<{ done
         }
     };
 
+    // นับรวมทุก op (รวม skip) เพื่อให้ตัวเลขบน UI เดินถึง total เสมอ
+    const total = ops.length;
+    let processed = 0;
+    const step = async (op: ApplyOp) => {
+        await run(op);
+        ctx.onProgress?.(++processed, total);
+    };
+
     // Push first (upload), then pulls in dependency order, then other
-    for (const op of pushOps) await run(op);
-    for (const op of pullOps) await run(op);
-    for (const op of other) await run(op);
+    for (const op of pushOps) await step(op);
+    for (const op of pullOps) await step(op);
+    for (const op of other) await step(op);
 
     return { done, skipped, failed };
 }

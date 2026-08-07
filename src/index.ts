@@ -50,10 +50,17 @@ if (/(^#|[#&])(access_token|error)=/.test(window.location.hash)) {
     try { localStorage.setItem('tavernsync_oauth_hash', window.location.hash); } catch { /* ignore */ }
     console.debug('[TavernSync]', 'oauth hash captured in popup window — closing');
     window.close();
-    // ถ้าเบราว์เซอร์ไม่ยอมให้ปิดตัวเอง อย่างน้อยก็บอกผู้ใช้แทนที่จะโหลด ST เต็มหน้าต่าง
-    window.addEventListener('DOMContentLoaded', () => {
+    // ถ้าเบราว์เซอร์ไม่ยอมให้ปิดตัวเอง (COOP ตัดสาย opener) อย่างน้อยก็บอกผู้ใช้แทนที่จะโหลด ST เต็มหน้าต่าง
+    // — ST โหลด extension ด้วย dynamic import หลัง DOMContentLoaded ผ่านไปแล้ว
+    //   การ addEventListener เฉย ๆ จึงไม่มีวันยิง ต้องเช็ค readyState ก่อน
+    const showClosePrompt = (): void => {
         document.body.innerHTML = '<p style="font-family:sans-serif;padding:2em">TavernSync เชื่อมต่อแล้ว — ปิดหน้าต่างนี้ได้เลย</p>';
-    });
+    };
+    if (document.readyState === 'loading') {
+        window.addEventListener('DOMContentLoaded', showClosePrompt);
+    } else {
+        showClosePrompt();
+    }
 }
 
 function setStatusLine(text: string): void {
@@ -718,8 +725,20 @@ function registerEventListeners(): void {
 
     const genStart = event_types.GENERATION_STARTED ?? 'generation_started';
     const genEnd = event_types.GENERATION_ENDED ?? 'generation_ended';
-    eventSource.on(genStart, () => setGenerationBusy(true));
+    const genStopped = event_types.GENERATION_STOPPED ?? 'generation_stopped';
+    // ST ยิง GENERATION_STARTED ทั้งตอน generate จริง และตอน dry run ที่ Prompt Manager
+    // ใช้ประกอบ prompt เพื่อนับโทเคน (openai.js → Generate('normal', {}, true)) โดยส่ง
+    // dryRun มาเป็นอาร์กิวเมนต์ตัวที่ 3 — dry run ไม่มี GENERATION_ENDED ตามมา เพราะอีเวนต์นั้น
+    // ยิงจาก hideStopButton() ซึ่งทำงานเฉพาะตอนปุ่ม stop โชว์อยู่ ถ้าล็อกตาม dry run ด้วย
+    // ล็อกจะค้างถาวรและ Push/Pull พังทุกครั้งแม้รีโหลดหน้า
+    eventSource.on(genStart, (...args: unknown[]) => {
+        if (args[2] === true) return;
+        setGenerationBusy(true);
+    });
     eventSource.on(genEnd, () => setGenerationBusy(false));
+    // กดหยุดกลางคัน: stopGeneration() ยิง GENERATION_STOPPED เสมอ แต่ยิง GENERATION_ENDED
+    // เฉพาะสาขา abortController — สตรีมที่ถูกหยุดจึงอาจไม่มี ENDED ตามมาเลย
+    eventSource.on(genStopped, () => setGenerationBusy(false));
 
     // Chat close approximation: CHAT_CHANGED after leaving a chat
     const chatChanged = event_types.CHAT_CHANGED ?? 'chat_changed';
