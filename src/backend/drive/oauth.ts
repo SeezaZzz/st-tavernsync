@@ -56,14 +56,16 @@ export class GisTokenProvider implements DriveTokenProvider {
         }
     }
 
-    /** เรียกจาก user gesture เท่านั้น — ข้าม prompt:'' ไป consent ตรง ๆ
-     *  (บางเบราว์เซอร์ที่บล็อก third-party cookies ทำ prompt:'' ค้างเงียบ ๆ ไม่ยิง callback) */
+    /** เรียกจาก user gesture เท่านั้น — ข้าม prompt:'' ไป popup ตรง ๆ
+     *  (บางเบราว์เซอร์ที่บล็อก third-party cookies ทำ prompt:'' ค้างเงียบ ๆ ไม่ยิง callback)
+     *  ใช้ select_account — ถ้ายังไม่เคย consent Google จะโชว์หน้า consent เองอัตโนมัติ,
+     *  ถ้าเคยแล้วเหลือแค่เลือกบัญชีคลิกเดียว (ไม่ต้องยินยอม scope ซ้ำ) */
     async getTokenInteractive(): Promise<string> {
         if (this.token && Date.now() < this.expiresAt - 30_000) return this.token;
         if (this.inflight) return this.inflight;
         // ใช้ popup implicit flow ของเราเอง ไม่ผ่าน GIS iframe — GIS callback หายเงียบ ๆ
         // ในบางเบราว์เซอร์ (3p storage ถูกบล็อก) ทำให้ Connect ค้างทั้งที่ผู้ใช้ consent สำเร็จแล้ว
-        this.inflight = this.requestViaPopup('consent');
+        this.inflight = this.requestViaPopup('select_account');
         try {
             return await this.inflight;
         } finally {
@@ -142,23 +144,24 @@ export class GisTokenProvider implements DriveTokenProvider {
         const client = this.loadClient ? await this.loadClient() : await this.loadGisClient();
         try {
             // default prompt ว่าง — ใช้ session เดิมเงียบ ๆ (auto-sync ไม่มี gesture ก็ผ่านถ้าเคย consent)
-            return await this.requestOnce(client, '');
+            // timeout สั้น (8s): ถ้าช่องทางเงียบพัง (GIS callback ไม่ยิง) จะได้ตกไป popup เร็ว ไม่ต้องรอนาน
+            return await this.requestOnce(client, '', 8_000);
         } catch (e) {
             // error ที่ต้องให้ผู้ใช้เลือกเอง (access_denied ฯลฯ) โยนต่อ ไม่ fallback
             if (e instanceof GisError && e.code !== INTERACTION_REQUIRED) throw e;
             // interaction_required หรือ GIS ค้าง/timeout → fallback popup implicit flow ของเราเอง
             // (ถ้าไม่ได้อยู่ใน gesture window popup จะโดนบล็อกและฟ้อง error ชัดเจนแทนที่จะค้าง)
             console.debug('[TavernSync]', 'silent GIS path failed, falling back to popup flow:', e);
-            return this.requestViaPopup('consent');
+            return this.requestViaPopup('select_account');
         }
     }
 
-    private requestOnce(client: GisTokenClient, prompt: string): Promise<string> {
+    private requestOnce(client: GisTokenClient, prompt: string, timeoutMs = 120_000): Promise<string> {
         return new Promise((resolve, reject) => {
             // กันค้างนิรันดร์ — GIS ไม่มี timeout ของตัวเอง ถ้า popup โดนบล็อกเงียบ ๆ หรือ callback ไม่ยิง promise จะแขวนตลอด
             const timer = setTimeout(() => {
-                reject(new Error(`Google sign-in ไม่ตอบกลับใน 2 นาที (prompt:'${prompt}') — เช็กว่า popup ถูกบล็อก หรือ accounts.google.com โดน adblock/tracking prevention`));
-            }, 120_000);
+                reject(new Error(`Google sign-in ไม่ตอบกลับใน ${Math.round(timeoutMs / 1000)} วินาที (prompt:'${prompt}') — เช็กว่า popup ถูกบล็อก หรือ accounts.google.com โดน adblock/tracking prevention`));
+            }, timeoutMs);
             const cb = (resp: GisTokenResponse) => {
                 clearTimeout(timer);
                 if (resp.access_token) {

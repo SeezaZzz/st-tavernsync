@@ -142,7 +142,7 @@ describe('GisTokenProvider', () => {
         expect(url).toContain('client_id=cid');
         expect(url).toContain('redirect_uri=' + encodeURIComponent('http://127.0.0.1:8000'));
         expect(url).toContain('response_type=token');
-        expect(url).toContain('prompt=consent');
+        expect(url).toContain('prompt=select_account');
     });
 
     it('getTokenInteractive ข้าม GIS ไป popup implicit flow ตรง ๆ และ cache token ต่อได้', async () => {
@@ -153,7 +153,7 @@ describe('GisTokenProvider', () => {
         env.callbackWrites('#access_token=tok_direct&expires_in=3600');
         await expect(pending).resolves.toBe('tok_direct');
         expect(env.open).toHaveBeenCalledTimes(1);
-        expect(String(env.open.mock.calls[0]?.[0])).toContain('prompt=consent');
+        expect(String(env.open.mock.calls[0]?.[0])).toContain('prompt=select_account');
         await expect(p.getTokenInteractive()).resolves.toBe('tok_direct');
         expect(env.open).toHaveBeenCalledTimes(1); // cache — ไม่เปิด popup ซ้ำ
     });
