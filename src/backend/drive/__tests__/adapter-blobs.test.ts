@@ -90,4 +90,19 @@ describe('discoverDriveLayout', () => {
         } as unknown as DriveClient;
         await expect(discoverDriveLayout(client)).rejects.toBeInstanceOf(MultipleRootsError);
     });
+
+    it('knownFolderId → ข้าม searchRootFolders ใช้ root ที่จำไว้ (เลี่ยง MultipleRootsError)', async () => {
+        const children = [
+            { id: 'm1', name: 'manifests' },
+            { id: 'b1', name: 'blobs' },
+        ];
+        const client = {
+            ...clientStub(children),
+            searchRootFolders: vi.fn(async () => { throw new Error('should not search'); }),
+        } as unknown as DriveClient;
+        const layout = await discoverDriveLayout(client, 'r_known');
+        expect(layout).toEqual({ rootId: 'r_known', manifestsId: 'm1', blobsId: 'b1' });
+        expect(client.listChildren).toHaveBeenCalledWith('r_known');
+        expect(client.searchRootFolders).not.toHaveBeenCalled();
+    });
 });

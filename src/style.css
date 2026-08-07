@@ -25,3 +25,10 @@
 .tavernsync-settings .checkbox_label {
     margin-right: 0.75em;
 }
+
+.tavernsync-settings .tavernsync_row {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin: 0.5em 0;
+}

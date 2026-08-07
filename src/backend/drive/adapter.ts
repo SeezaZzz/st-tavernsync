@@ -22,7 +22,15 @@ export class MultipleRootsError extends Error {
     }
 }
 
-export async function discoverDriveLayout(client: DriveClient): Promise<DriveLayout> {
+export async function discoverDriveLayout(client: DriveClient, knownFolderId?: string): Promise<DriveLayout> {
+    // root ที่จำไว้จาก Connect ครั้งก่อน — ข้ามการค้นหา (เลี่ยง MultipleRootsError ซ้ำ)
+    if (knownFolderId) {
+        const children = await client.listChildren(knownFolderId);
+        const manifests = children.find(c => c.name === 'manifests');
+        const blobs = children.find(c => c.name === 'blobs');
+        if (!manifests || !blobs) throw new Error('TavernSync root is incomplete (missing manifests/ or blobs/)');
+        return { rootId: knownFolderId, manifestsId: manifests.id, blobsId: blobs.id };
+    }
     const roots = await client.searchRootFolders();
     if (roots.length > 1) throw new MultipleRootsError(roots);
     if (roots.length === 1) {

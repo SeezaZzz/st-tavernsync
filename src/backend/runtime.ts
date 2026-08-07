@@ -100,7 +100,7 @@ export async function requireRuntime(): Promise<BackendRuntime> {
         if (!s.driveClientId.trim()) throw new Error('No Google Client ID configured');
         const provider = new GisTokenProvider(s.driveClientId.trim());
         const client = new DriveClient(provider);
-        const layout = await discoverDriveLayout(client); // MultipleRootsError → UI จับใน Task 9
+        const layout = await discoverDriveLayout(client, s.driveFolderId.trim() || undefined); // MultipleRootsError → UI จับใน Task 9
         // sessionKey (passphrase-derived, extractable) ต้องพร้อมก่อน — engine gate อยู่แล้ว (runSync เช็ก E2EE ก่อน)
         const sk = getSessionKey();
         if (!sk?.extractable) throw new Error('Drive backend บังคับ E2EE — ปลดล็อก passphrase ก่อน');

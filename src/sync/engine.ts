@@ -6,6 +6,7 @@ import { ConflictError, type StorageRevision } from '../backend/adapter';
 import { uploadBlobsParallel } from '../backend/http';
 import { requireRuntime, type BackendRuntime } from '../backend/runtime';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
+import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
 import { loadBlob, loadLocalManifest, scanLocal, storeBlob } from '../st-adapter/scan';
 import { applyLocalItem, decodeUtf8Jsonl, parseItemId, writeChat } from '../st-adapter/write';
@@ -49,8 +50,18 @@ function httpNamespaceFromSettings(): string {
     }
 }
 
+/** namespace จาก settings ตาม backendMode — drive ผูกกับ root folderId (ตรงกับ runtime.storageNamespace) */
+function namespaceFromSettings(): string {
+    const s = getSettings();
+    if (s.backendMode === 'drive') {
+        const folderId = s.driveFolderId.trim();
+        return folderId ? `drive:${folderId}` : 'drive:';
+    }
+    return httpNamespaceFromSettings();
+}
+
 function rememberedKeyStorageKey(): string {
-    return e2eeKeyStorageKey(currentNamespace || httpNamespaceFromSettings());
+    return e2eeKeyStorageKey(currentNamespace || namespaceFromSettings());
 }
 
 export function setGenerationBusy(busy: boolean): void {
@@ -131,7 +142,8 @@ export async function tryRestoreE2eeKey(): Promise<boolean> {
     try {
         const b64 = await getSyncStore().getItem<string>(rememberedKeyStorageKey());
         if (!b64) return false;
-        sessionKey = await importAesKey(b64decode(b64));
+        // Drive runtime ต้อง exportKeyRaw(sessionKey) เพื่อ derive HKDF subkeys → restore แบบ extractable
+        sessionKey = await importAesKey(b64decode(b64), s.backendMode === 'drive');
         console.log(LOG_PREFIX, 'Restored remembered E2EE key for this device');
         return true;
     } catch (e) {
@@ -148,6 +160,8 @@ export async function tryRestoreE2eeKey(): Promise<boolean> {
 export async function syncAccountSalt(passphrase?: string): Promise<void> {
     const s = getSettings();
     if (!s.e2eeEnabled) return;
+    // Drive: salt derive จาก folderId แบบ deterministic — Connect/unlock เขียนลง settings ให้แล้ว ไม่ต้อง sync ผ่าน network
+    if (s.backendMode === 'drive') return;
     if (!s.endpoint.trim() || !s.deviceToken.trim()) return;
 
     const rt = await requireRuntime();
@@ -186,9 +200,21 @@ export async function unlockE2ee(passphrase: string): Promise<void> {
     const s = getSettings();
     sessionPassphrase = passphrase;
     const remember = !s.e2eeRequireSessionUnlock;
+    // Drive runtime ต้อง exportKeyRaw(sessionKey) เพื่อ derive HKDF subkeys → บังคับ extractable เสมอ
+    const extractable = remember || s.backendMode === 'drive';
 
     // Prefer account salt from server when available
-    if (s.endpoint.trim() && s.deviceToken.trim()) {
+    if (s.backendMode === 'drive') {
+        // Drive: salt = SHA-256(folderId) แบบ deterministic — ต้อง Connect Google ก่อนเพื่อรู้ folderId
+        const folderId = s.driveFolderId.trim();
+        if (!folderId) {
+            sessionPassphrase = null;
+            throw new Error('Connect Google ก่อน แล้วค่อยปลดล็อก passphrase');
+        }
+        currentNamespace = `drive:${folderId}`;
+        s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(folderId));
+        saveSettings();
+    } else if (s.endpoint.trim() && s.deviceToken.trim()) {
         try {
             const rt = await requireRuntime();
             currentNamespace = rt.storageNamespace;
@@ -204,10 +230,10 @@ export async function unlockE2ee(passphrase: string): Promise<void> {
 
     let key: CryptoKey;
     if (s.e2eeSalt) {
-        const derived = await deriveKey(passphrase, decodeSalt(s.e2eeSalt), { extractable: remember });
+        const derived = await deriveKey(passphrase, decodeSalt(s.e2eeSalt), { extractable });
         key = derived.key;
     } else {
-        const derived = await deriveKey(passphrase, undefined, { extractable: remember });
+        const derived = await deriveKey(passphrase, undefined, { extractable });
         key = derived.key;
         s.e2eeSalt = encodeSalt(derived.salt);
         saveSettings();

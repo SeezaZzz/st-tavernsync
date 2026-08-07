@@ -18,9 +18,11 @@
                 <select id="tavernsync_backend_mode" class="text_pole flex1">
                     <option value="custom">Your own server</option>
                     <option value="managed">Managed (coming soon)</option>
+                    <option value="drive">Google Drive</option>
                 </select>
             </div>
 
+            <div id="tavernsync_http_fields">
             <label for="tavernsync_endpoint"><b>Server URL</b></label>
             <div class="flex-container flexGap5 alignItemsCenter">
                 <input id="tavernsync_endpoint" class="text_pole flex1" type="url" autocomplete="off"
@@ -31,17 +33,30 @@
             </div>
             <small class="tavernsync-hint">Where this device sends and receives sync data.</small>
 
-            <label for="tavernsync_device_name"><b>Device name</b></label>
-            <input id="tavernsync_device_name" class="text_pole" type="text" autocomplete="off"
-                placeholder="laptop" />
-            <small class="tavernsync-hint">Just a label so you can tell devices apart (e.g. laptop, phone).</small>
-
             <label for="tavernsync_device_token"><b>Sync token</b></label>
             <input id="tavernsync_device_token" class="text_pole" type="password" autocomplete="off"
                 placeholder="shared secret for your sync account" />
             <small class="tavernsync-hint">
                 Same token on every device you want to sync. Use a dedicated sync secret — not your SillyTavern login password.
             </small>
+            </div>
+
+            <label for="tavernsync_device_name"><b>Device name</b></label>
+            <input id="tavernsync_device_name" class="text_pole" type="text" autocomplete="off"
+                placeholder="laptop" />
+            <small class="tavernsync-hint">Just a label so you can tell devices apart (e.g. laptop, phone).</small>
+
+            <div id="tavernsync_drive_fields" style="display:none">
+                <label>Google Client ID</label>
+                <input id="tavernsync_client_id" type="text" class="text_pole" placeholder="xxxx.apps.googleusercontent.com" />
+                <small>สร้างเองที่ Google Cloud Console — ดูคู่มือใน docs/google-drive-setup.md (ทุกเครื่องต้องใช้ Client ID เดียวกัน)</small>
+                <div class="tavernsync_row">
+                    <div id="tavernsync_google_connect" class="menu_button">Connect Google</div>
+                    <div id="tavernsync_google_disconnect" class="menu_button">Disconnect</div>
+                </div>
+                <small>E2EE ถูกบังคับเปิดสำหรับ backend นี้ — ข้อมูลทุกไบต์เข้ารหัสก่อนถึง Google</small>
+            </div>
+            <div id="tavernsync_gc" class="menu_button" style="display:none">Clean up old data (Drive)</div>
 
             <div id="tavernsync_quota_line" class="tavernsync-hint">Storage: —</div>
 
