@@ -114,7 +114,7 @@ describe('GisTokenProvider', () => {
             location: { href: 'http://localhost:8000/#access_token=tok_popup&expires_in=3600' },
             close: () => { fakePopup.closed = true; },
         };
-        const open = vi.fn(() => fakePopup as never);
+        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
         vi.stubGlobal('window', { google, location: { origin: 'http://localhost:8000' }, open });
 
         const p = new GisTokenProvider('cid');
@@ -134,7 +134,7 @@ describe('GisTokenProvider', () => {
             location: { href: 'http://localhost:8000/#access_token=tok_direct&expires_in=3600' },
             close: () => { fakePopup.closed = true; },
         };
-        const open = vi.fn(() => fakePopup as never);
+        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
         vi.stubGlobal('window', { location: { origin: 'http://localhost:8000' }, open });
 
         const p = new GisTokenProvider('cid');
