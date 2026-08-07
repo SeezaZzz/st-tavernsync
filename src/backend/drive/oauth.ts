@@ -54,6 +54,22 @@ export class GisTokenProvider implements DriveTokenProvider {
         }
     }
 
+    /** เรียกจาก user gesture เท่านั้น — ข้าม prompt:'' ไป consent ตรง ๆ
+     *  (บางเบราว์เซอร์ที่บล็อก third-party cookies ทำ prompt:'' ค้างเงียบ ๆ ไม่ยิง callback) */
+    async getTokenInteractive(): Promise<string> {
+        if (this.token && Date.now() < this.expiresAt - 30_000) return this.token;
+        if (this.inflight) return this.inflight;
+        this.inflight = (async () => {
+            const client = this.loadClient ? await this.loadClient() : await this.loadGisClient();
+            return this.requestOnce(client, 'consent');
+        })();
+        try {
+            return await this.inflight;
+        } finally {
+            this.inflight = null;
+        }
+    }
+
     private async requestToken(): Promise<string> {
         const client = this.loadClient ? await this.loadClient() : await this.loadGisClient();
         try {

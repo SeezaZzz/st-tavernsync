@@ -270,6 +270,9 @@ async function handleDriveConnect(): Promise<void> {
     try {
         await withLoader('Connecting to Google Drive…', async () => {
             const client = makeDriveClient();
+            // warm token ด้วย consent popup ตรง ๆ ก่อน — ปุ่มนี้คือ gesture
+            // (prompt:'' ที่ลองก่อนค้างเงียบ ๆ ในเบราว์เซอร์ที่บล็อก third-party cookies)
+            await getSharedGisTokenProvider(s.driveClientId.trim()).getTokenInteractive();
             let layout: DriveLayout;
             try {
                 // ปุ่มนี้คือ user gesture — token ครั้งแรกจะเด้ง consent ที่นี่
