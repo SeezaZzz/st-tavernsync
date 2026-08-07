@@ -3,6 +3,10 @@ import type { DriveTokenProvider } from './client';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
+/** หน้า callback ที่ Google redirect กลับมา (serve จากโฟลเดอร์ extension ของ ST) — ต้องตรงกับ redirect URI ที่ whitelist */
+const OAUTH_CALLBACK_PATH = '/scripts/extensions/third-party/st-tavernsync/oauth-callback.html';
+/** key ที่ callback page เขียน URL hash (มี access_token) ลง localStorage ให้หน้าหลักอ่าน */
+const OAUTH_RESULT_KEY = 'tavernsync_oauth_hash';
 
 /** ส่วนของ GIS token client ที่เราใช้ — thin wrapper ให้ mock ได้ในเทส
  *  callback รีแอสไซน์ได้บน instance เดิม (GIS รองรับ) — ห้ามสร้าง client ใหม่ตอนขอ token */
@@ -69,12 +73,14 @@ export class GisTokenProvider implements DriveTokenProvider {
         }
     }
 
-    /** OAuth implicit flow แบบเขียนเอง: เปิด popup ไป accounts.google.com แล้วรอ redirect กลับมาที่
-     *  origin ของเราพร้อม #access_token — ไม่พึ่ง GIS iframe/third-party storage เลย
-     *  ต้อง whitelist origin นี้ใน Authorized redirect URIs ของ Client ID ด้วย */
+    /** OAuth implicit flow แบบเขียนเอง: เปิด popup ไป accounts.google.com → redirect กลับมาที่
+     *  oauth-callback.html (origin เดียวกับเรา) ซึ่งเขียน hash ลง localStorage แล้วปิดตัวเอง —
+     *  รับผลผ่าน localStorage/storage event ไม่พึ่ง popup handle เพราะ Google ส่ง COOP มากับ
+     *  หน้า sign-in ทำ opener reference ตาย (อ่าน closed=true ทั้งที่หน้าต่างยังเปิดอยู่)
+     *  ต้อง whitelist URL callback นี้ใน Authorized redirect URIs ของ Client ID ด้วย */
     private requestViaPopup(prompt: string): Promise<string> {
         return new Promise((resolve, reject) => {
-            const redirectUri = window.location.origin;
+            const redirectUri = window.location.origin + OAUTH_CALLBACK_PATH;
             const url =
                 'https://accounts.google.com/o/oauth2/v2/auth' +
                 `?client_id=${encodeURIComponent(this.clientId)}` +
@@ -83,45 +89,53 @@ export class GisTokenProvider implements DriveTokenProvider {
                 `&scope=${encodeURIComponent(SCOPE)}` +
                 `&prompt=${encodeURIComponent(prompt)}` +
                 '&include_granted_scopes=true';
-            console.debug('[TavernSync]', `opening OAuth popup (redirect back to ${redirectUri})…`);
+            console.debug('[TavernSync]', `opening OAuth popup (callback ${redirectUri})…`);
             const popup = window.open(url, 'tavernsync-oauth', 'width=520,height=640');
             if (!popup) {
                 reject(new Error('เปิดหน้าต่าง Google sign-in ไม่ได้ — popup ถูกบล็อก กดอนุญาต popup ของเว็บนี้ก่อน'));
                 return;
             }
-            const finish = (fn: () => void) => {
+
+            try { localStorage.removeItem(OAUTH_RESULT_KEY); } catch { /* ถ้าใช้ไม่ได้จะ timeout เอง */ }
+            let settled = false;
+            const cleanup = () => {
                 clearInterval(poller);
                 clearTimeout(timer);
-                try { popup.close(); } catch { /* cross-origin แล้วแต่กรณี */ }
-                fn();
+                window.removeEventListener('storage', onStorage);
             };
-            const poller = setInterval(() => {
-                if (popup.closed) {
-                    finish(() => reject(new GisError('popup_closed')));
-                    return;
-                }
-                let href: string;
-                try {
-                    href = popup.location.href; // cross-origin จะ throw จนกว่าจะ redirect กลับมาที่ origin เรา
-                } catch {
-                    return;
-                }
-                // about:blank ตอน popup เพิ่งเปิดก็อ่านได้ (same-origin) — ข้ามจนกว่าจะ redirect กลับ origin เราจริง
-                if (!href.startsWith(redirectUri)) return;
-                const hash = new URLSearchParams(new URL(href).hash.slice(1));
-                const token = hash.get('access_token');
-                const err = hash.get('error');
+            const handleHash = (hash: string) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                try { popup.close(); } catch { /* handle อาจตายจาก COOP — callback page ปิดตัวเองอยู่แล้ว */ }
+                const params = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash);
+                const token = params.get('access_token');
+                const err = params.get('error');
                 if (token) {
                     this.token = token;
-                    this.expiresAt = Date.now() + Number(hash.get('expires_in') ?? 3600) * 1000;
-                    console.debug('[TavernSync]', 'OAuth token acquired via popup redirect');
-                    finish(() => resolve(this.token!));
+                    this.expiresAt = Date.now() + Number(params.get('expires_in') ?? 3600) * 1000;
+                    console.debug('[TavernSync]', 'OAuth token acquired via popup callback');
+                    resolve(this.token);
                 } else {
-                    finish(() => reject(new GisError(err ?? 'unknown')));
+                    reject(new GisError(err ?? 'unknown'));
                 }
-            }, 250);
+            };
+            const readStore = () => {
+                let hash: string | null = null;
+                try { hash = localStorage.getItem(OAUTH_RESULT_KEY); } catch { return; }
+                if (hash) {
+                    try { localStorage.removeItem(OAUTH_RESULT_KEY); } catch { /* ignore */ }
+                    handleHash(hash);
+                }
+            };
+            const onStorage = (e: StorageEvent) => {
+                if (e.key === OAUTH_RESULT_KEY && e.newValue) handleHash(e.newValue);
+            };
+            window.addEventListener('storage', onStorage);
+            const poller = setInterval(readStore, 300);
             const timer = setTimeout(() => {
-                finish(() => reject(new Error('Google sign-in ไม่ตอบกลับใน 2 นาที — ถ้า popup ฟ้อง redirect_uri_mismatch ให้เพิ่ม origin นี้ใน Authorized redirect URIs ของ Client ID')));
+                cleanup();
+                reject(new Error('Google sign-in ไม่ตอบกลับใน 2 นาที — ถ้าปิด popup ไปเองถือว่ายกเลิก; ถ้า popup ฟ้อง redirect_uri_mismatch ให้เพิ่ม URL callback ใน Authorized redirect URIs ของ Client ID'));
             }, 120_000);
         });
     }

@@ -106,64 +106,75 @@ describe('GisTokenProvider', () => {
         expect(instances[0].calls).toHaveLength(1);
     });
 
+    /** env สำหรับ popup flow ใหม่: รับผลผ่าน localStorage (callback page เขียน hash) ไม่พึ่ง popup handle */
+    function popupEnv() {
+        const store = new Map<string, string>();
+        vi.stubGlobal('localStorage', {
+            getItem: (k: string) => store.get(k) ?? null,
+            setItem: (k: string, v: string) => void store.set(k, v),
+            removeItem: (k: string) => void store.delete(k),
+        });
+        const fakePopup = { close: vi.fn() };
+        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
+        vi.stubGlobal('window', {
+            location: { origin: 'http://127.0.0.1:8000' },
+            open,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+        });
+        const callbackWrites = (hash: string) => store.set('tavernsync_oauth_hash', hash);
+        return { store, open, fakePopup, callbackWrites };
+    }
+
     it('prompt ว่างเจอ interaction_required → fallback ไป popup implicit flow ของตัวเอง', async () => {
         installGisGlobals(inst => inst.callback({ error: 'interaction_required' }));
         const google = (window as unknown as { google: unknown }).google;
-        const fakePopup: { closed: boolean; location: { href: string }; close: () => void } = {
-            closed: false,
-            location: { href: 'http://localhost:8000/#access_token=tok_popup&expires_in=3600' },
-            close: () => { fakePopup.closed = true; },
-        };
-        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
-        vi.stubGlobal('window', { google, location: { origin: 'http://localhost:8000' }, open });
+        const env = popupEnv();
+        vi.stubGlobal('window', { ...(window as unknown as object), google, open: env.open });
 
         const p = new GisTokenProvider('cid');
-        await expect(p.getToken()).resolves.toBe('tok_popup');
-        expect(open).toHaveBeenCalledTimes(1);
-        const url = String(open.mock.calls[0]?.[0]);
+        const pending = p.getToken();
+        await new Promise(r => setTimeout(r, 50)); // รอ popup เปิด + ล้าง key เก่าก่อน (ของจริง callback มาหลังผู้ใช้กดเสมอ)
+        env.callbackWrites('#access_token=tok_popup&expires_in=3600');
+        await expect(pending).resolves.toBe('tok_popup');
+        expect(env.open).toHaveBeenCalledTimes(1);
+        const url = String(env.open.mock.calls[0]?.[0]);
         expect(url).toContain('client_id=cid');
-        expect(url).toContain('redirect_uri=http%3A%2F%2Flocalhost%3A8000');
+        expect(url).toContain('redirect_uri=' + encodeURIComponent('http://127.0.0.1:8000/scripts/extensions/third-party/st-tavernsync/oauth-callback.html'));
         expect(url).toContain('response_type=token');
         expect(url).toContain('prompt=consent');
-        expect(fakePopup.closed).toBe(true);
     });
 
-    it('getTokenInteractive ข้าม GIS ไป popup implicit flow ตรง ๆ', async () => {
-        const fakePopup = {
-            closed: false,
-            location: { href: 'http://localhost:8000/#access_token=tok_direct&expires_in=3600' },
-            close: () => { fakePopup.closed = true; },
-        };
-        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
-        vi.stubGlobal('window', { location: { origin: 'http://localhost:8000' }, open });
-
+    it('getTokenInteractive ข้าม GIS ไป popup implicit flow ตรง ๆ และ cache token ต่อได้', async () => {
+        const env = popupEnv();
         const p = new GisTokenProvider('cid');
+        const pending = p.getTokenInteractive();
+        await new Promise(r => setTimeout(r, 50));
+        env.callbackWrites('#access_token=tok_direct&expires_in=3600');
+        await expect(pending).resolves.toBe('tok_direct');
+        expect(env.open).toHaveBeenCalledTimes(1);
+        expect(String(env.open.mock.calls[0]?.[0])).toContain('prompt=consent');
         await expect(p.getTokenInteractive()).resolves.toBe('tok_direct');
-        expect(open).toHaveBeenCalledTimes(1);
-        expect(String(open.mock.calls[0]?.[0])).toContain('prompt=consent');
-        // cache ใช้ต่อได้ — ไม่เปิด popup ซ้ำ
-        await expect(p.getTokenInteractive()).resolves.toBe('tok_direct');
-        expect(open).toHaveBeenCalledTimes(1);
+        expect(env.open).toHaveBeenCalledTimes(1); // cache — ไม่เปิด popup ซ้ำ
     });
 
-    it('popup flow ข้าม about:blank ตอน popup เพิ่งเปิด รอจน redirect กลับ origin เราจริง', async () => {
-        let reads = 0;
-        const fakePopup = {
-            closed: false,
-            location: {
-                get href() {
-                    // 2 tick แรก popup ยังเป็น about:blank (same-origin อ่านได้) — ห้ามตีความเป็น error
-                    return ++reads > 2 ? 'http://localhost:8000/#access_token=tok_wait&expires_in=3600' : 'about:blank';
-                },
-            },
-            close: () => { fakePopup.closed = true; },
-        };
-        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
-        vi.stubGlobal('window', { location: { origin: 'http://localhost:8000' }, open });
-
+    it('popup handle ตายจาก COOP (close ก็โยน) — flow ยังสำเร็จเพราะรับผลผ่าน localStorage', async () => {
+        const env = popupEnv();
+        env.fakePopup.close.mockImplementation(() => { throw new Error('severed by COOP'); });
         const p = new GisTokenProvider('cid');
-        await expect(p.getTokenInteractive()).resolves.toBe('tok_wait');
-        expect(reads).toBeGreaterThan(2);
+        const pending = p.getTokenInteractive();
+        await new Promise(r => setTimeout(r, 50));
+        env.callbackWrites('#access_token=tok_coop&expires_in=3600');
+        await expect(pending).resolves.toBe('tok_coop');
+    });
+
+    it('callback ส่ง error กลับมา → reject "Google sign-in failed: <code>"', async () => {
+        const env = popupEnv();
+        const p = new GisTokenProvider('cid');
+        const pending = p.getTokenInteractive();
+        await new Promise(r => setTimeout(r, 50));
+        env.callbackWrites('#error=access_denied');
+        await expect(pending).rejects.toThrow('Google sign-in failed: access_denied');
     });
 
     it('getToken พร้อมกันก่อน resolve → requestAccessToken ครั้งเดียว แชร์ token เดียวกัน', async () => {
