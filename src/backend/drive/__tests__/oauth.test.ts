@@ -146,6 +146,26 @@ describe('GisTokenProvider', () => {
         expect(open).toHaveBeenCalledTimes(1);
     });
 
+    it('popup flow ข้าม about:blank ตอน popup เพิ่งเปิด รอจน redirect กลับ origin เราจริง', async () => {
+        let reads = 0;
+        const fakePopup = {
+            closed: false,
+            location: {
+                get href() {
+                    // 2 tick แรก popup ยังเป็น about:blank (same-origin อ่านได้) — ห้ามตีความเป็น error
+                    return ++reads > 2 ? 'http://localhost:8000/#access_token=tok_wait&expires_in=3600' : 'about:blank';
+                },
+            },
+            close: () => { fakePopup.closed = true; },
+        };
+        const open = vi.fn((_url?: unknown, _target?: unknown, _features?: unknown) => fakePopup as never);
+        vi.stubGlobal('window', { location: { origin: 'http://localhost:8000' }, open });
+
+        const p = new GisTokenProvider('cid');
+        await expect(p.getTokenInteractive()).resolves.toBe('tok_wait');
+        expect(reads).toBeGreaterThan(2);
+    });
+
     it('getToken พร้อมกันก่อน resolve → requestAccessToken ครั้งเดียว แชร์ token เดียวกัน', async () => {
         let listener: ((resp: GisResp) => void) | null = null;
         const calls: { prompt?: string }[] = [];

@@ -106,6 +106,8 @@ export class GisTokenProvider implements DriveTokenProvider {
                 } catch {
                     return;
                 }
+                // about:blank ตอน popup เพิ่งเปิดก็อ่านได้ (same-origin) — ข้ามจนกว่าจะ redirect กลับ origin เราจริง
+                if (!href.startsWith(redirectUri)) return;
                 const hash = new URLSearchParams(new URL(href).hash.slice(1));
                 const token = hash.get('access_token');
                 const err = hash.get('error');
