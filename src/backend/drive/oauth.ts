@@ -192,6 +192,11 @@ export class GisTokenProvider implements DriveTokenProvider {
 
     markExpiredForTest(): void { this.expiresAt = 0; }
 
+    /** มี token ที่ยังไม่หมดอายุอยู่ใน memory ไหม (ใช้โชว์สถานะไฟเขียวในแผง) */
+    hasValidToken(): boolean {
+        return !!this.token && Date.now() < this.expiresAt - 30_000;
+    }
+
     private async loadGisClient(): Promise<GisTokenClient> {
         if (this.client) return this.client;
         console.debug('[TavernSync]', 'loading GIS script (accounts.google.com/gsi/client)…');

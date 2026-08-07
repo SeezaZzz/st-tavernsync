@@ -128,6 +128,7 @@ function hydrateSettingsUI(): void {
     $('#tavernsync_client_id').val(s.driveClientId);
     // โชว์ origin ของเครื่องนี้ให้ก็อปไปแปะใน Cloud Console (ทั้ง 2 ช่องใช้ค่าเดียวกัน)
     $('#tavernsync_origin_display').text(window.location.origin);
+    updateDriveStatus();
 
     $('#tavernsync_scope_settings').prop('checked', s.scope.settings);
     $('#tavernsync_scope_characters').prop('checked', s.scope.characters);
@@ -207,6 +208,25 @@ async function handleConnect(): Promise<void> {
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Could not connect: ${String(e)}`, 'TavernSync');
+    }
+}
+
+/** ไฟสถานะ Drive ในแผง: เขียว = token สดใน memory, เหลือง = เคยเชื่อมต่อแต่ token หายตอนรีเฟรช, เทา = ยังไม่เคย */
+function updateDriveStatus(): void {
+    const el = document.getElementById('tavernsync_drive_status');
+    if (!el) return;
+    const s = getSettings();
+    if (s.backendMode !== 'drive') return;
+    const clientId = s.driveClientId.trim();
+    if (clientId && getSharedGisTokenProvider(clientId).hasValidToken()) {
+        el.textContent = '● เชื่อมต่อ Google Drive แล้ว';
+        el.style.color = '#66bb6a';
+    } else if (s.driveFolderId.trim()) {
+        el.textContent = '● เคยเชื่อมต่อไว้แล้ว — token อยู่แค่ใน memory กด Connect ใหม่หลังรีเฟรช';
+        el.style.color = '#ffb74d';
+    } else {
+        el.textContent = '● ยังไม่ได้เชื่อมต่อ Google';
+        el.style.color = '';
     }
 }
 
@@ -299,6 +319,7 @@ async function handleDriveConnect(): Promise<void> {
             );
         });
         toastr.success('Connected to Google Drive — ปลดล็อก passphrase แล้ว Push/Pull ได้เลย', 'TavernSync');
+        updateDriveStatus();
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Connect failed: ${String(e)}`, 'TavernSync');
@@ -310,6 +331,7 @@ async function handleDriveDisconnect(): Promise<void> {
         await driveProvider?.revoke();
         driveProvider = null;
         toastr.info('Disconnected Google — token บนเครื่องนี้ถูก revoke แล้ว (ข้อมูลบน Drive ยังอยู่)', 'TavernSync');
+        updateDriveStatus();
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Disconnect failed: ${String(e)}`, 'TavernSync');
