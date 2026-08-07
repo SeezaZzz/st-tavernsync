@@ -103,7 +103,7 @@ export async function requireRuntime(): Promise<BackendRuntime> {
         const layout = await discoverDriveLayout(client); // MultipleRootsError → UI จับใน Task 9
         // sessionKey (passphrase-derived, extractable) ต้องพร้อมก่อน — engine gate อยู่แล้ว (runSync เช็ก E2EE ก่อน)
         const sk = getSessionKey();
-        if (!sk) throw new Error('Drive backend บังคับ E2EE — ปลดล็อก passphrase ก่อน');
+        if (!sk?.extractable) throw new Error('Drive backend บังคับ E2EE — ปลดล็อก passphrase ก่อน');
         const subkeys = await deriveDriveSubkeys(await exportKeyRaw(sk), layout.rootId);
         const crypto = makeDriveCrypto(subkeys);
         return {
