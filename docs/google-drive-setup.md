@@ -4,6 +4,8 @@
 
 ต้องทำครั้งเดียวต่อบัญชี Google: สร้าง **OAuth Client ID ของตัวเอง** แล้วเอาไปใส่ในแผง TavernSync **ทุกเครื่องใช้ Client ID เดียวกัน**
 
+> **ทำไมต้องสร้างเอง?** เพราะ Client ID คือ "ประตู" เข้าถึง Drive ของผู้ใช้ — ถ้ามี Client ID กลางที่แชร์กัน คนที่ถือมัน (รวมถึงผู้พัฒนา) จะเป็นคนกลางที่ต้องรับผิดชอบข้อมูลทุกคน TavernSync เลือกให้ทุกคนถือประตูของตัวเอง ไม่มีคนกลาง ไม่มีใครเก็บอีเมล/ข้อมูลของใคร — ข้อมูลเป็นของคุณ 100%
+
 ---
 
 ## ขั้นที่ 1: สร้าง Google Cloud project + เปิด Drive API
@@ -29,9 +31,9 @@ TavernSync ขอ access token ฝั่งเบราว์เซอร์ต�
 
 1. ไปที่ **Google Auth Platform → Clients → Create OAuth client** (หรือปุ่ม **Create OAuth client** ในหน้า Overview)
 2. Application type: **Web application**
-3. ช่อง **Authorized JavaScript origins** ใส่ origin ของ SillyTavern ให้ตรง **scheme + host + port** เป๊ะ ๆ และช่อง **Authorized redirect URIs** ใส่ origin เดียวกันต่อท้ายด้วย `/scripts/extensions/third-party/st-tavernsync/oauth-callback.html` เช่น:
-   - เปิดบนเครื่องตัวเอง: origins ใส่ `http://localhost:8000` และ redirect URIs ใส่ `http://localhost:8000/scripts/extensions/third-party/st-tavernsync/oauth-callback.html` (ถ้าเปิด ST ที่ `http://127.0.0.1:8000` ให้ใส่แบบ `127.0.0.1` แทน — ดูจาก address bar ว่าเป็นอันไหน หรือใส่ไว้ทั้งคู่)
-   - เข้าจากเครื่องอื่นด้วยโดเมน: `https://st.example.com` (+ callback path เดียวกันใน redirect URIs) — **origin ที่ไม่ใช่ localhost ต้องเป็น HTTPS เท่านั้น**
+3. ช่อง **Authorized JavaScript origins** และช่อง **Authorized redirect URIs** ใส่ origin ของ SillyTavern **เหมือนกันเป๊ะทั้งสองช่อง** (แผง TavernSync มีบรรทัด "origin ของเครื่องนี้" ให้ก็อป ไม่ต้องพิมพ์เอง) ให้ตรง **scheme + host + port** เป๊ะ ๆ เช่น:
+   - เปิดบนเครื่องตัวเอง: `http://localhost:8000` หรือ `http://127.0.0.1:8000` (ดูจาก address bar ว่าเปิด ST ที่ไหน — ใส่ทั้งคู่ก็ได้)
+   - เข้าจากเครื่องอื่นด้วยโดเมน: `https://st.example.com` — **origin ที่ไม่ใช่ localhost ต้องเป็น HTTPS เท่านั้น**
    - **IP LAN ดิบ ๆ (เช่น `http://192.168.1.10:8000`) ใช้ไม่ได้** — Google ไม่ยอมรับ ต้องตั้ง hostname หรือใช้ tunnel ที่เป็น HTTPS แทน
    - ใส่ได้หลาย origin — เครื่องไหนเข้า ST ผ่าน origin ไหนก็ใส่ครบทุกอัน
 4. กด **Create** → ก็อปปี้ **Client ID** (หน้าตาประมาณ `xxxx.apps.googleusercontent.com`) เก็บไว้

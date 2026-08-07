@@ -3,9 +3,7 @@ import type { DriveTokenProvider } from './client';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
-/** หน้า callback ที่ Google redirect กลับมา (serve จากโฟลเดอร์ extension ของ ST) — ต้องตรงกับ redirect URI ที่ whitelist */
-const OAUTH_CALLBACK_PATH = '/scripts/extensions/third-party/st-tavernsync/oauth-callback.html';
-/** key ที่ callback page เขียน URL hash (มี access_token) ลง localStorage ให้หน้าหลักอ่าน */
+/** key ที่หน้าต่าง popup (หลัง redirect กลับมาที่ origin เรา) เขียน URL hash ที่มี access_token ลง localStorage ให้หน้าหลักอ่าน */
 const OAUTH_RESULT_KEY = 'tavernsync_oauth_hash';
 
 /** ส่วนของ GIS token client ที่เราใช้ — thin wrapper ให้ mock ได้ในเทส
@@ -73,14 +71,14 @@ export class GisTokenProvider implements DriveTokenProvider {
         }
     }
 
-    /** OAuth implicit flow แบบเขียนเอง: เปิด popup ไป accounts.google.com → redirect กลับมาที่
-     *  oauth-callback.html (origin เดียวกับเรา) ซึ่งเขียน hash ลง localStorage แล้วปิดตัวเอง —
+    /** OAuth implicit flow แบบเขียนเอง: เปิด popup ไป accounts.google.com → redirect กลับมาที่ origin root
+     *  (ST โหลดในหน้าต่างนั้นแวบเดียว ตัว extension จับ hash เขียนลง localStorage แล้วปิดตัวเอง) —
      *  รับผลผ่าน localStorage/storage event ไม่พึ่ง popup handle เพราะ Google ส่ง COOP มากับ
      *  หน้า sign-in ทำ opener reference ตาย (อ่าน closed=true ทั้งที่หน้าต่างยังเปิดอยู่)
-     *  ต้อง whitelist URL callback นี้ใน Authorized redirect URIs ของ Client ID ด้วย */
+     *  redirect URI ที่ต้อง whitelist คือ origin เฉย ๆ เหมือน JavaScript origins — ไม่มี path ยาว ๆ */
     private requestViaPopup(prompt: string): Promise<string> {
         return new Promise((resolve, reject) => {
-            const redirectUri = window.location.origin + OAUTH_CALLBACK_PATH;
+            const redirectUri = window.location.origin;
             const url =
                 'https://accounts.google.com/o/oauth2/v2/auth' +
                 `?client_id=${encodeURIComponent(this.clientId)}` +
@@ -89,7 +87,7 @@ export class GisTokenProvider implements DriveTokenProvider {
                 `&scope=${encodeURIComponent(SCOPE)}` +
                 `&prompt=${encodeURIComponent(prompt)}` +
                 '&include_granted_scopes=true';
-            console.debug('[TavernSync]', `opening OAuth popup (callback ${redirectUri})…`);
+            console.debug('[TavernSync]', `opening OAuth popup (redirect back to ${redirectUri})…`);
             const popup = window.open(url, 'tavernsync-oauth', 'width=520,height=640');
             if (!popup) {
                 reject(new Error('เปิดหน้าต่าง Google sign-in ไม่ได้ — popup ถูกบล็อก กดอนุญาต popup ของเว็บนี้ก่อน'));

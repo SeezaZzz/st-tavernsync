@@ -140,7 +140,7 @@ describe('GisTokenProvider', () => {
         expect(env.open).toHaveBeenCalledTimes(1);
         const url = String(env.open.mock.calls[0]?.[0]);
         expect(url).toContain('client_id=cid');
-        expect(url).toContain('redirect_uri=' + encodeURIComponent('http://127.0.0.1:8000/scripts/extensions/third-party/st-tavernsync/oauth-callback.html'));
+        expect(url).toContain('redirect_uri=' + encodeURIComponent('http://127.0.0.1:8000'));
         expect(url).toContain('response_type=token');
         expect(url).toContain('prompt=consent');
     });
