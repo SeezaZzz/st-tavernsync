@@ -19,7 +19,7 @@ import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
 import { emptyManifest } from '../sync-core/types';
-import { BASE_KEY, e2eeKeyStorageKey, getSyncStore } from '../state/store';
+import { LEGACY_BASE_KEY, baseStorageKey, e2eeKeyStorageKey, getSyncStore } from '../state/store';
 
 export interface BaseState {
     manifest: Manifest;
@@ -83,16 +83,35 @@ export function isGenerationBusy(): boolean {
     return true;
 }
 
+/** คีย์ base ของ backend ปัจจุบัน — pattern เดียวกับ rememberedKeyStorageKey() */
+function baseKeyForCurrentBackend(): string {
+    return baseStorageKey(currentNamespace || namespaceFromSettings());
+}
+
 export async function loadBase(): Promise<BaseState | null> {
-    return getSyncStore().getItem<BaseState>(BASE_KEY);
+    const store = getSyncStore();
+    const key = baseKeyForCurrentBackend();
+    const scoped = await store.getItem<BaseState>(key);
+    if (scoped) return scoped;
+
+    // ย้ายสมุดเล่มเก่า (สมัยยังไม่แยกตาม backend) เข้าคีย์ใหม่ครั้งเดียว — เนื้อในเหมือนเดิมทุกอย่าง
+    // ทำให้พฤติกรรมของเครื่องที่อัปเกรดมาไม่เปลี่ยน แล้วค่อยแยกกันจริงตอนสลับ backend ครั้งถัดไป
+    const legacy = await store.getItem<BaseState>(LEGACY_BASE_KEY);
+    if (!legacy) return null;
+    await store.setItem(key, legacy);
+    await store.removeItem(LEGACY_BASE_KEY);
+    console.log(LOG_PREFIX, `Migrated legacy base → ${key}`);
+    return legacy;
 }
 
 export async function saveBase(state: BaseState): Promise<void> {
-    await getSyncStore().setItem(BASE_KEY, state);
+    await getSyncStore().setItem(baseKeyForCurrentBackend(), state);
 }
 
 export async function clearBase(): Promise<void> {
-    await getSyncStore().removeItem(BASE_KEY);
+    const store = getSyncStore();
+    await store.removeItem(baseKeyForCurrentBackend());
+    await store.removeItem(LEGACY_BASE_KEY); // กวาดของเก่าทิ้งด้วย ไม่งั้นถูก migrate กลับมาอีก
 }
 
 export async function wipeRemoteSyncData(): Promise<void> {
