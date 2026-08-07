@@ -2,7 +2,7 @@ import './style.css';
 import { HttpStorageAdapter } from './backend/http';
 import { requireRuntime } from './backend/runtime';
 import { DriveClient, type DriveFileMeta } from './backend/drive/client';
-import { GisTokenProvider } from './backend/drive/oauth';
+import { GisTokenProvider, getSharedGisTokenProvider } from './backend/drive/oauth';
 import {
     discoverDriveLayout,
     MultipleRootsError,
@@ -212,7 +212,8 @@ let driveProvider: GisTokenProvider | null = null;
 
 function makeDriveClient(): DriveClient {
     const s = getSettings();
-    driveProvider = new GisTokenProvider(s.driveClientId.trim());
+    // instance กลางต่อ clientId — ทุก path (Connect/GC/requireRuntime) ใช้ token cache เดียวกัน
+    driveProvider = getSharedGisTokenProvider(s.driveClientId.trim());
     return new DriveClient(driveProvider);
 }
 

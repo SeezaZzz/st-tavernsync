@@ -3,7 +3,7 @@ import type { StorageAdapter } from './adapter';
 import { HttpStorageAdapter } from './http';
 import { DriveClient } from './drive/client';
 import { DriveAdapter, discoverDriveLayout } from './drive/adapter';
-import { GisTokenProvider } from './drive/oauth';
+import { getSharedGisTokenProvider } from './drive/oauth';
 import { getSettings } from '../settings';
 import { seal, open, decodeSalt, encodeSalt, exportKeyRaw } from '../crypto';
 import { deriveDriveSubkeys, driveSaltFromFolderIdAsync, hmacNameFor, type DriveSubkeys } from '../crypto/subkeys';
@@ -98,7 +98,8 @@ export async function requireRuntime(): Promise<BackendRuntime> {
     const s = getSettings();
     if (s.backendMode === 'drive') {
         if (!s.driveClientId.trim()) throw new Error('No Google Client ID configured');
-        const provider = new GisTokenProvider(s.driveClientId.trim());
+        // provider กลาง (แชร์กับ Connect/GC) — token cache รอดข้าม sync → ไม่เด้ง consent ทุกครั้ง
+        const provider = getSharedGisTokenProvider(s.driveClientId.trim());
         const client = new DriveClient(provider);
         const layout = await discoverDriveLayout(client, s.driveFolderId.trim() || undefined); // MultipleRootsError → UI จับใน Task 9
         // sessionKey (passphrase-derived, extractable) ต้องพร้อมก่อน — engine gate อยู่แล้ว (runSync เช็ก E2EE ก่อน)
