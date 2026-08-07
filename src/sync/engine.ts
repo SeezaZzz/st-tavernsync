@@ -2,26 +2,29 @@
  * Orchestrates scan → diff → plan → push/pull with optional E2EE.
  */
 
-import { ConflictError } from '../backend/adapter';
-import { HttpStorageAdapter, uploadBlobsParallel } from '../backend/http';
-import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey, open, seal } from '../crypto';
+import { ConflictError, manifestVersionForPush, type StorageRevision } from '../backend/adapter';
+import { uploadBlobsParallel } from '../backend/http';
+import { requireRuntime, type BackendRuntime } from '../backend/runtime';
+import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
+import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
 import { loadBlob, loadLocalManifest, scanLocal, storeBlob } from '../st-adapter/scan';
 import { applyLocalItem, decodeUtf8Jsonl, parseItemId, writeChat } from '../st-adapter/write';
 import { stFetchJson } from '../st-adapter/http';
 import { conflictSiblingId, tryChatFastForward } from '../sync-core/conflict';
 import { diffManifests, summarizeDiff } from '../sync-core/diff';
+import { mergeManifestItems } from '../sync-core/merge';
 import { applyOp } from '../sync-core/apply';
 import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
 import { emptyManifest } from '../sync-core/types';
-import { BASE_KEY, E2EE_KEY_STORAGE, getSyncStore } from '../state/store';
+import { BASE_KEY, e2eeKeyStorageKey, getSyncStore } from '../state/store';
 
 export interface BaseState {
     manifest: Manifest;
     syncedAt: number;
-    remoteVersion: number;
+    remoteVersion: StorageRevision;
 }
 
 export type ConflictChoice = 'local' | 'remote' | 'both' | 'skip';
@@ -29,6 +32,37 @@ export type ConflictChoice = 'local' | 'remote' | 'both' | 'skip';
 let sessionKey: CryptoKey | null = null;
 let sessionPassphrase: string | null = null;
 let generating = false;
+/** storageNamespace ของ runtime ล่าสุด — ใช้ต่อ remembered key storage */
+let currentNamespace = '';
+
+export function getSessionKey(): CryptoKey | null {
+    return sessionKey;
+}
+
+/** HTTP namespace จาก settings โดยตรง — ใช้ตอนยังไม่มี runtime (เช่น tryRestoreE2eeKey ตอน load) */
+function httpNamespaceFromSettings(): string {
+    const endpoint = getSettings().endpoint.trim();
+    if (!endpoint) return 'http:';
+    try {
+        return `http:${new URL(endpoint).host}`;
+    } catch {
+        return 'http:';
+    }
+}
+
+/** namespace จาก settings ตาม backendMode — drive ผูกกับ root folderId (ตรงกับ runtime.storageNamespace) */
+function namespaceFromSettings(): string {
+    const s = getSettings();
+    if (s.backendMode === 'drive') {
+        const folderId = s.driveFolderId.trim();
+        return folderId ? `drive:${folderId}` : 'drive:';
+    }
+    return httpNamespaceFromSettings();
+}
+
+function rememberedKeyStorageKey(): string {
+    return e2eeKeyStorageKey(currentNamespace || namespaceFromSettings());
+}
 
 export function setGenerationBusy(busy: boolean): void {
     generating = busy;
@@ -52,11 +86,15 @@ export async function clearBase(): Promise<void> {
 
 export async function wipeRemoteSyncData(): Promise<void> {
     const s = getSettings();
-    const adapter = requireAdapter();
-    const { version } = await adapter.getManifest();
-    const empty = emptyManifest(s.deviceName || 'device', version);
+    const rt = await requireRuntime();
+    currentNamespace = rt.storageNamespace;
+    const adapter = rt.storage;
+    const snap = await adapter.getSnapshot();
+    if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
+    const remoteVersion = snap.revision;
+    const empty = emptyManifest(s.deviceName || 'device', snap.manifest?.version ?? 0);
     empty.items = {};
-    const { version: next } = await adapter.putManifest(empty, version);
+    const { revision: next } = await adapter.putManifest(empty, remoteVersion);
     await saveBase({ manifest: empty, syncedAt: Date.now(), remoteVersion: next });
     s.lastStatusMessage = 'Remote wiped';
     s.lastItemCount = 0;
@@ -80,15 +118,15 @@ function b64decode(s: string): Uint8Array {
 async function persistRememberedKey(key: CryptoKey): Promise<void> {
     const s = getSettings();
     if (s.e2eeRequireSessionUnlock) {
-        await getSyncStore().removeItem(E2EE_KEY_STORAGE);
+        await getSyncStore().removeItem(rememberedKeyStorageKey());
         return;
     }
     const raw = await exportKeyRaw(key);
-    await getSyncStore().setItem(E2EE_KEY_STORAGE, b64encode(raw));
+    await getSyncStore().setItem(rememberedKeyStorageKey(), b64encode(raw));
 }
 
 async function clearRememberedKey(): Promise<void> {
-    await getSyncStore().removeItem(E2EE_KEY_STORAGE);
+    await getSyncStore().removeItem(rememberedKeyStorageKey());
 }
 
 /**
@@ -102,9 +140,10 @@ export async function tryRestoreE2eeKey(): Promise<boolean> {
     if (s.e2eeRequireSessionUnlock) return false;
 
     try {
-        const b64 = await getSyncStore().getItem<string>(E2EE_KEY_STORAGE);
+        const b64 = await getSyncStore().getItem<string>(rememberedKeyStorageKey());
         if (!b64) return false;
-        sessionKey = await importAesKey(b64decode(b64));
+        // Drive runtime ต้อง exportKeyRaw(sessionKey) เพื่อ derive HKDF subkeys → restore แบบ extractable
+        sessionKey = await importAesKey(b64decode(b64), s.backendMode === 'drive');
         console.log(LOG_PREFIX, 'Restored remembered E2EE key for this device');
         return true;
     } catch (e) {
@@ -121,9 +160,12 @@ export async function tryRestoreE2eeKey(): Promise<boolean> {
 export async function syncAccountSalt(passphrase?: string): Promise<void> {
     const s = getSettings();
     if (!s.e2eeEnabled) return;
+    // Drive: salt derive จาก folderId แบบ deterministic — Connect/unlock เขียนลง settings ให้แล้ว ไม่ต้อง sync ผ่าน network
+    if (s.backendMode === 'drive') return;
     if (!s.endpoint.trim() || !s.deviceToken.trim()) return;
 
-    const adapter = requireAdapter();
+    const rt = await requireRuntime();
+    currentNamespace = rt.storageNamespace;
     let localSalt = s.e2eeSalt;
     if (!localSalt) {
         // Need a salt to publish — create one if unlocking
@@ -134,7 +176,7 @@ export async function syncAccountSalt(passphrase?: string): Promise<void> {
         saveSettings();
     }
 
-    const canonical = await adapter.ensureAccountSalt(localSalt);
+    const canonical = encodeSalt(await rt.saltProvider.ensureSalt(decodeSalt(localSalt)));
     if (canonical !== s.e2eeSalt) {
         console.warn(LOG_PREFIX, 'Adopting account E2EE salt from server (was device-local)');
         s.e2eeSalt = canonical;
@@ -158,14 +200,27 @@ export async function unlockE2ee(passphrase: string): Promise<void> {
     const s = getSettings();
     sessionPassphrase = passphrase;
     const remember = !s.e2eeRequireSessionUnlock;
+    // Drive runtime ต้อง exportKeyRaw(sessionKey) เพื่อ derive HKDF subkeys → บังคับ extractable เสมอ
+    const extractable = remember || s.backendMode === 'drive';
 
     // Prefer account salt from server when available
-    if (s.endpoint.trim() && s.deviceToken.trim()) {
+    if (s.backendMode === 'drive') {
+        // Drive: salt = SHA-256(folderId) แบบ deterministic — ต้อง Connect Google ก่อนเพื่อรู้ folderId
+        const folderId = s.driveFolderId.trim();
+        if (!folderId) {
+            sessionPassphrase = null;
+            throw new Error('Connect Google ก่อน แล้วค่อยปลดล็อก passphrase');
+        }
+        currentNamespace = `drive:${folderId}`;
+        s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(folderId));
+        saveSettings();
+    } else if (s.endpoint.trim() && s.deviceToken.trim()) {
         try {
-            const adapter = requireAdapter();
-            const { e2eeSalt } = await adapter.getAccount();
-            if (e2eeSalt) {
-                s.e2eeSalt = e2eeSalt;
+            const rt = await requireRuntime();
+            currentNamespace = rt.storageNamespace;
+            const salt = await rt.saltProvider.getSalt();
+            if (salt) {
+                s.e2eeSalt = encodeSalt(salt);
                 saveSettings();
             }
         } catch (e) {
@@ -175,10 +230,10 @@ export async function unlockE2ee(passphrase: string): Promise<void> {
 
     let key: CryptoKey;
     if (s.e2eeSalt) {
-        const derived = await deriveKey(passphrase, decodeSalt(s.e2eeSalt), { extractable: remember });
+        const derived = await deriveKey(passphrase, decodeSalt(s.e2eeSalt), { extractable });
         key = derived.key;
     } else {
-        const derived = await deriveKey(passphrase, undefined, { extractable: remember });
+        const derived = await deriveKey(passphrase, undefined, { extractable });
         key = derived.key;
         s.e2eeSalt = encodeSalt(derived.salt);
         saveSettings();
@@ -248,66 +303,14 @@ function scopeTypeSet(scope: SyncScopeSettings): Set<string> {
     return set;
 }
 
-function requireAdapter(): HttpStorageAdapter {
-    const s = getSettings();
-    if (!s.endpoint.trim()) throw new Error('No endpoint configured');
-    if (!s.deviceToken.trim()) throw new Error('No device token configured');
-    return new HttpStorageAdapter({ endpoint: s.endpoint.trim(), deviceToken: s.deviceToken.trim() });
-}
-
-/**
- * R2 object key = plaintext content hash.
- * Body may still be AES-GCM ciphertext when E2EE is on.
- * (HMAC keys were dropped — per-device salts caused cross-device 404s.)
- */
-async function blobStorageKey(plaintextHash: string): Promise<string> {
-    return plaintextHash;
-}
-
-async function getRemoteBlob(adapter: HttpStorageAdapter, plaintextHash: string): Promise<Uint8Array> {
-    const key = await blobStorageKey(plaintextHash);
-    return adapter.getBlob(key);
+async function getRemoteBlob(rt: BackendRuntime, plaintextHash: string): Promise<Uint8Array> {
+    // engine ส่ง logical content hash เสมอ — adapter แปลงเป็น blob name เอง
+    return rt.storage.getBlob(plaintextHash);
 }
 
 function isBlobMissingError(e: unknown): boolean {
     const msg = e instanceof Error ? e.message : String(e);
     return /\b404\b/.test(msg) || /not.?found/i.test(msg);
-}
-
-async function maybeEncrypt(bytes: Uint8Array): Promise<Uint8Array> {
-    const s = getSettings();
-    if (!s.e2eeEnabled) return bytes;
-    if (!sessionKey) throw new Error('E2EE enabled but no key on this device — enter passphrase once');
-    return seal(sessionKey, bytes);
-}
-
-async function maybeDecrypt(bytes: Uint8Array, expectedHash: string): Promise<Uint8Array> {
-    const s = getSettings();
-    if (!s.e2eeEnabled) {
-        const hash = await sha256Hex(bytes);
-        if (hash !== expectedHash) {
-            throw new Error(`Blob hash mismatch: expected ${expectedHash}, got ${hash}`);
-        }
-        return bytes;
-    }
-    if (!sessionKey) throw new Error('E2EE enabled but no key on this device — enter passphrase once');
-
-    try {
-        const plain = await open(sessionKey, bytes);
-        const hash = await sha256Hex(plain);
-        if (hash !== expectedHash) {
-            throw new Error(`Blob hash mismatch: expected ${expectedHash}, got ${hash}`);
-        }
-        return plain;
-    } catch (decryptErr) {
-        // Older pushes may have stored plaintext under the same content hash (E2EE off → on).
-        const asPlainHash = await sha256Hex(bytes);
-        if (asPlainHash === expectedHash) {
-            console.warn(LOG_PREFIX, 'Blob was plaintext; accepting despite E2EE on', expectedHash.slice(0, 12));
-            return bytes;
-        }
-        throw decryptErr;
-    }
 }
 
 export async function runScan(onProgress?: (m: string) => void) {
@@ -323,7 +326,7 @@ export async function getStatusDiff(): Promise<{
     local: Manifest;
     remote: Manifest | null;
     base: Manifest | null;
-    remoteVersion: number;
+    remoteVersion: StorageRevision;
     entries: DiffEntry[];
     summary: ReturnType<typeof summarizeDiff>;
     itemCount: number;
@@ -335,12 +338,15 @@ export async function getStatusDiff(): Promise<{
     }
 
     let remote: Manifest | null = null;
-    let remoteVersion = 0;
+    let remoteVersion: StorageRevision = '0';
     try {
-        const adapter = requireAdapter();
-        const got = await adapter.getManifest();
-        remote = got.manifest;
-        remoteVersion = got.version;
+        const rt = await requireRuntime();
+        currentNamespace = rt.storageNamespace;
+        const adapter = rt.storage;
+        const snap = await adapter.getSnapshot();
+        if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
+        remote = snap.manifest;
+        remoteVersion = snap.revision;
     } catch (e) {
         console.warn(LOG_PREFIX, 'Remote unavailable for status', e);
     }
@@ -406,15 +412,15 @@ async function resolveChatConflict(
     id: string,
     localHash: string,
     remoteHash: string,
-    adapter: HttpStorageAdapter,
+    rt: BackendRuntime,
 ): Promise<'local' | 'remote' | 'both' | 'fast_forward_local' | 'fast_forward_remote'> {
     let localBytes = await loadBlob(localHash);
     if (!localBytes || localBytes.byteLength === 0) {
         // re-scan needed; treat as both
         return 'both';
     }
-    const remoteBoxed = await getRemoteBlob(adapter, remoteHash);
-    const remoteBytes = await maybeDecrypt(remoteBoxed, remoteHash);
+    const remoteBoxed = await getRemoteBlob(rt, remoteHash);
+    const remoteBytes = await rt.crypto.decryptBlob(remoteBoxed, remoteHash);
     const localMsgs = decodeUtf8Jsonl(localBytes);
     const remoteMsgs = decodeUtf8Jsonl(remoteBytes);
     const ff = tryChatFastForward(localMsgs, remoteMsgs);
@@ -455,7 +461,9 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             throw new Error('E2EE enabled but no key on this device — enter passphrase once');
         }
     }
-    const adapter = requireAdapter();
+    const rt = await requireRuntime();
+    currentNamespace = rt.storageNamespace;
+    const adapter = rt.storage;
     const progress = (m: string) => {
         opts.onProgress?.(m);
         console.log(LOG_PREFIX, m);
@@ -466,7 +474,49 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
     const local = scanned.manifest;
 
     progress('Fetching remote manifest…');
-    let { manifest: remote, version: remoteVersion } = await adapter.getManifest();
+    const snap = await adapter.getSnapshot();
+    let remote: Manifest | null;
+    let remoteVersion: StorageRevision = snap.revision;
+    if (snap.kind === 'single') {
+        remote = snap.manifest;
+    } else if (snap.heads.length === 0) {
+        remote = snap.commonAncestor;
+    } else {
+        // fork: 3-way merge heads เทียบ commonAncestor — conflict เข้า resolveConflicts เดิม
+        // (ห้ามตัดสินด้วย mtime/อายุ; merge ทีละ head โดย base คือ commonAncestor คงที่)
+        progress(`Fork detected (${snap.heads.length} heads) — merging…`);
+        const baseItems: Record<string, SyncItem> = snap.commonAncestor?.items ?? {};
+        let mergedItems: Record<string, SyncItem> = { ...baseItems };
+        for (const head of snap.heads) {
+            const r = mergeManifestItems(baseItems, mergedItems, head.manifest.items);
+            if (r.conflicts.length) {
+                let choices = new Map<string, ConflictChoice>();
+                if (opts.resolveConflicts) {
+                    choices = await opts.resolveConflicts(r.conflicts, opts.direction);
+                } else if (opts.resolveConflict) {
+                    for (const c of r.conflicts) {
+                        choices.set(c.id, await opts.resolveConflict(c));
+                    }
+                }
+                for (const c of r.conflicts) {
+                    // Safe default เหมือน conflict path เดิม: pull → remote, อื่น ๆ → skip
+                    const fallback: ConflictChoice =
+                        opts.direction === 'pull' ? 'remote' : 'skip';
+                    const choice = choices.get(c.id) || fallback;
+                    if (choice === 'local') {
+                        if (c.local) r.merged[c.id] = c.local;
+                    } else if (choice === 'remote' || choice === 'both') {
+                        // 'both': ฝั่ง remote ชนะใน manifest — local copy ของ device นี้ยังอยู่
+                        // และ diff ปกติข้างล่างจะเด้ง conflict UI อีกครั้ง (keep_both ทำที่ apply)
+                        if (c.remote) r.merged[c.id] = c.remote;
+                    }
+                    // 'skip' → เว้นไว้ (ไม่ใส่ merged)
+                }
+            }
+            mergedItems = r.merged;
+        }
+        remote = { ...snap.heads[0].manifest, items: mergedItems };
+    }
     const baseState = await loadBase();
 
     let entries = diffManifests(local, baseState?.manifest ?? null, remote);
@@ -477,7 +527,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         if (e.action !== 'conflict' || e.type !== 'chat') continue;
         if (!e.local || !e.remote) continue;
         try {
-            const decision = await resolveChatConflict(e.id, e.local.hash, e.remote.hash, adapter);
+            const decision = await resolveChatConflict(e.id, e.local.hash, e.remote.hash, rt);
             if (decision === 'fast_forward_remote') {
                 e.action = 'pull';
             } else if (decision === 'fast_forward_local') {
@@ -497,8 +547,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             // Field-level merge attempt
             try {
                 const localBytes = await loadBlob(e.local.hash);
-                const remoteBoxed = await getRemoteBlob(adapter, e.remote.hash);
-                const remoteBytes = await maybeDecrypt(remoteBoxed, e.remote.hash);
+                const remoteBoxed = await getRemoteBlob(rt, e.remote.hash);
+                const remoteBytes = await rt.crypto.decryptBlob(remoteBoxed, e.remote.hash);
                 const localObj = JSON.parse(new TextDecoder().decode(localBytes!)) as Record<string, unknown>;
                 const remoteObj = JSON.parse(new TextDecoder().decode(remoteBytes)) as Record<string, unknown>;
                 let baseObj: Record<string, unknown> | null = null;
@@ -577,14 +627,13 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             if (!data || data.byteLength === 0) {
                 throw new Error(`Missing local blob for ${id} (${hash})`);
             }
-            data = await maybeEncrypt(data);
-            const key = await blobStorageKey(hash);
-            await uploadBlobsParallel(adapter, [{ hash: key, data }]);
+            data = await rt.crypto.encryptBlob(data);
+            await uploadBlobsParallel(adapter, [{ hash, data }]);
         },
         pullAndApply: async (id, type, hash) => {
             let boxed: Uint8Array;
             try {
-                boxed = await getRemoteBlob(adapter, hash);
+                boxed = await getRemoteBlob(rt, hash);
             } catch (e) {
                 if (isBlobMissingError(e)) {
                     pullSkipped++;
@@ -599,7 +648,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             }
             let plain: Uint8Array;
             try {
-                plain = await maybeDecrypt(boxed, hash);
+                plain = await rt.crypto.decryptBlob(boxed, hash);
             } catch (e) {
                 pullSkipped++;
                 console.error(LOG_PREFIX, `Skipping pull ${id}: decrypt/hash failed`, e);
@@ -629,8 +678,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             const sibling = conflictSiblingId(id, s.deviceName || 'remote');
             let plain: Uint8Array;
             try {
-                const boxed = await getRemoteBlob(adapter, entry.remote.hash);
-                plain = await maybeDecrypt(boxed, entry.remote.hash);
+                const boxed = await getRemoteBlob(rt, entry.remote.hash);
+                plain = await rt.crypto.decryptBlob(boxed, entry.remote.hash);
             } catch (e) {
                 console.error(LOG_PREFIX, 'keep_both: could not fetch remote', id, e);
                 toastr.warning(
@@ -675,17 +724,12 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             }
         }
 
-        // Drop entries whose blobs are missing under both HMAC key and plaintext hash
+        // Drop entries whose blobs are missing under the backend's blob name
+        // (batch เช็กครั้งเดียว — HTTP endpoint รับ array อยู่แล้ว, Drive จะได้ list โฟลเดอร์รอบเดียว)
         const dropped: string[] = [];
+        const missingSet = new Set(await adapter.checkBlobs(Object.values(newItems).map(i => i.hash)));
         for (const [id, item] of Object.entries(newItems)) {
-            const keyed = await blobStorageKey(item.hash);
-            const missing = await adapter.checkBlobs(
-                keyed === item.hash ? [item.hash] : [keyed, item.hash],
-            );
-            const hasBlob = keyed === item.hash
-                ? !missing.includes(item.hash)
-                : !(missing.includes(keyed) && missing.includes(item.hash));
-            if (!hasBlob) {
+            if (missingSet.has(item.hash)) {
                 delete newItems[id];
                 dropped.push(id);
             }
@@ -699,20 +743,23 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         }
 
         const newManifest: Manifest = {
-            ...emptyManifest(s.deviceName || 'device', remoteVersion),
+            ...emptyManifest(s.deviceName || 'device', manifestVersionForPush(remoteVersion, remote)),
             items: newItems,
             updatedAt: Date.now(),
         };
 
         try {
-            const { version } = await adapter.putManifest(newManifest, remoteVersion);
-            await saveBase({ manifest: newManifest, syncedAt: Date.now(), remoteVersion: version });
+            const { revision } = await adapter.putManifest(newManifest, remoteVersion);
+            await saveBase({ manifest: newManifest, syncedAt: Date.now(), remoteVersion: revision });
         } catch (err) {
             if (err instanceof ConflictError) {
                 progress('412 conflict — re-diff once…');
-                const again = await adapter.getManifest();
-                remote = again.manifest;
-                remoteVersion = again.version;
+                const again = await adapter.getSnapshot();
+                if (again.kind === 'single') {
+                    remote = again.manifest;
+                    remoteVersion = again.revision;
+                }
+                // fork หรือ single ก็ abort เหมือนกัน — user retry แล้ว fork จะผ่าน merge path ข้างบน
                 throw new Error('Remote changed during push; please retry');
             }
             throw err;
@@ -730,7 +777,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 }
                 await saveBase({
                     manifest: {
-                        ...(prev?.manifest || emptyManifest(s.deviceName || 'device', remoteVersion)),
+                        ...(prev?.manifest || emptyManifest(s.deviceName || 'device', remote.version)),
                         items: mergedItems,
                         updatedAt: Date.now(),
                     },

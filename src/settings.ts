@@ -3,12 +3,12 @@
 export const LOG_PREFIX = '[TavernSync]';
 export const MODULE_NAME = 'tavernsync';
 /** Bump with package.json / manifest when releasing — logged on load so you can confirm cache bust. */
-export const BUILD_ID = '0.1.10';
+export const BUILD_ID = '0.2.0';
 
 /** Folder name under scripts/extensions/ when installed (third-party or system). */
 export const EXTENSION_FOLDER = 'third-party/st-tavernsync';
 
-export type BackendMode = 'managed' | 'custom';
+export type BackendMode = 'managed' | 'custom' | 'drive';
 
 export interface SyncScopeSettings {
     settings: boolean;
@@ -39,6 +39,10 @@ export interface TavernSyncSettings {
     e2eeRequireSessionUnlock: boolean;
     /** Base64 PBKDF2 salt — never store the passphrase itself */
     e2eeSalt: string;
+    /** Google OAuth client ID for the Drive backend */
+    driveClientId: string;
+    /** Drive root folder id — remembers the root selected/created per device */
+    driveFolderId: string;
     lastStatusMessage: string;
     lastItemCount: number;
 }
@@ -65,6 +69,8 @@ export const defaultSettings: Readonly<TavernSyncSettings> = Object.freeze({
     e2eeEnabled: true,
     e2eeRequireSessionUnlock: false,
     e2eeSalt: '',
+    driveClientId: '',
+    driveFolderId: '',
     lastStatusMessage: 'Not set up yet',
     lastItemCount: 0,
 });
@@ -111,7 +117,7 @@ export function getSettings(): TavernSyncSettings {
         backfillScope(settings.scope, defaultSettings.scope);
     }
 
-    if (typeof settings.backendMode !== 'string' || (settings.backendMode !== 'managed' && settings.backendMode !== 'custom')) {
+    if (typeof settings.backendMode !== 'string' || (settings.backendMode !== 'managed' && settings.backendMode !== 'custom' && settings.backendMode !== 'drive')) {
         settings.backendMode = defaultSettings.backendMode;
     }
 
@@ -122,6 +128,8 @@ export function getSettings(): TavernSyncSettings {
         settings.lastStatusMessage = defaultSettings.lastStatusMessage;
     }
     if (typeof settings.e2eeSalt !== 'string') settings.e2eeSalt = '';
+    if (typeof settings.driveClientId !== 'string') settings.driveClientId = '';
+    if (typeof settings.driveFolderId !== 'string') settings.driveFolderId = '';
     if (typeof settings.lastItemCount !== 'number') settings.lastItemCount = 0;
 
     settings.autoSyncOnStartup = !!settings.autoSyncOnStartup;

@@ -20,5 +20,10 @@ export function getSyncStore(): LocalForageInstance {
 }
 
 export const BASE_KEY = 'tavernsync_base';
-/** Raw AES-GCM key (base64) for remembered-device E2EE. Never store the passphrase. */
-export const E2EE_KEY_STORAGE = 'tavernsync_e2ee_key_b64';
+/**
+ * Raw AES-GCM key (base64) for remembered-device E2EE, namespaced per backend
+ * (e.g. "http:<host>" or "drive:<folderId>"). Never store the passphrase.
+ */
+export function e2eeKeyStorageKey(namespace: string): string {
+    return `tavernsync_e2ee_key_b64:${namespace}`;
+}

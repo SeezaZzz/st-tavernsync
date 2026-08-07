@@ -1,5 +1,17 @@
 import './style.css';
 import { HttpStorageAdapter } from './backend/http';
+import { requireRuntime } from './backend/runtime';
+import { DriveClient, type DriveFileMeta } from './backend/drive/client';
+import { GisTokenProvider, getSharedGisTokenProvider } from './backend/drive/oauth';
+import {
+    discoverDriveLayout,
+    MultipleRootsError,
+    type DriveAdapter,
+    type DriveLayout,
+} from './backend/drive/adapter';
+import { collectGarbage } from './backend/drive/gc';
+import { encodeSalt } from './crypto';
+import { driveSaltFromFolderIdAsync } from './crypto/subkeys';
 import {
     BUILD_ID,
     EXTENSION_FOLDER,
@@ -77,6 +89,21 @@ async function withLoader<T>(message: string, fn: () => Promise<T>): Promise<T> 
     }
 }
 
+/** แสดง/ซ่อนฟิลด์ตาม backendMode — drive: ซ่อน endpoint/token, บังคับ E2EE (disable checkbox) */
+function updateBackendFieldsVisibility(): void {
+    const s = getSettings();
+    const isDrive = s.backendMode === 'drive';
+    $('#tavernsync_drive_fields').toggle(isDrive);
+    $('#tavernsync_http_fields').toggle(!isDrive);
+    $('#tavernsync_gc').toggle(isDrive);
+    const $e2ee = $('#tavernsync_e2ee');
+    $e2ee.prop('disabled', isDrive);
+    $e2ee.closest('label').attr(
+        'title',
+        isDrive ? 'E2EE ถูกบังคับสำหรับ Google Drive backend — ข้อมูลทุกไบต์เข้ารหัสก่อนถึง Google' : '',
+    );
+}
+
 function hydrateSettingsUI(): void {
     const s = getSettings();
     ensureDeviceName();
@@ -85,6 +112,7 @@ function hydrateSettingsUI(): void {
     $('#tavernsync_endpoint').val(s.endpoint);
     $('#tavernsync_device_name').val(s.deviceName);
     $('#tavernsync_device_token').val(s.deviceToken);
+    $('#tavernsync_client_id').val(s.driveClientId);
 
     $('#tavernsync_scope_settings').prop('checked', s.scope.settings);
     $('#tavernsync_scope_characters').prop('checked', s.scope.characters);
@@ -107,6 +135,7 @@ function hydrateSettingsUI(): void {
             ? `${s.lastStatusMessage} · ${s.lastItemCount} items`
             : s.lastStatusMessage || 'Not set up yet',
     );
+    updateBackendFieldsVisibility();
     updateE2eeUi();
 }
 
@@ -138,6 +167,10 @@ async function ensureE2eeReady(): Promise<boolean> {
 
 async function handleConnect(): Promise<void> {
     const s = getSettings();
+    if (s.backendMode === 'drive') {
+        await handleDriveConnect();
+        return;
+    }
     if (!s.endpoint.trim() || !s.deviceToken.trim()) {
         toastr.warning('Add your server URL and sync token first.', 'TavernSync');
         return;
@@ -150,12 +183,12 @@ async function handleConnect(): Promise<void> {
         if (s.e2eeEnabled && hasE2eeKey()) {
             await syncAccountSalt();
         }
-        const { version } = await adapter.getManifest();
+        const snap = await adapter.getSnapshot();
         const quota = await adapter.quota();
         $('#tavernsync_quota_line').text(
             `Storage: ${formatBytes(quota.usedBytes)} / ${formatBytes(quota.limitBytes)} · ${quota.itemCount} files`,
         );
-        toastr.success(`Connected (v${version}).`, 'TavernSync');
+        toastr.success(`Connected (rev ${snap.revision.slice(0, 12)})`, 'TavernSync');
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Could not connect: ${String(e)}`, 'TavernSync');
@@ -172,6 +205,122 @@ function formatBytes(n: number): string {
         i++;
     }
     return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
+/** provider ล่าสุดจาก Connect — เก็บไว้ให้ Disconnect revoke token ที่ยังจำอยู่ */
+let driveProvider: GisTokenProvider | null = null;
+
+function makeDriveClient(): DriveClient {
+    const s = getSettings();
+    // instance กลางต่อ clientId — ทุก path (Connect/GC/requireRuntime) ใช้ token cache เดียวกัน
+    driveProvider = getSharedGisTokenProvider(s.driveClientId.trim());
+    return new DriveClient(driveProvider);
+}
+
+/** popup ให้เลือก root เมื่อเจอหลาย TavernSync folder (MultipleRootsError) */
+async function pickDriveRoot(roots: DriveFileMeta[]): Promise<string | null> {
+    const ctx = getCtx() as SillyTavernContext & {
+        callGenericPopup?: (
+            content: string | HTMLElement,
+            type?: number,
+            inputValue?: string,
+            options?: Record<string, unknown>,
+        ) => Promise<unknown>;
+        POPUP_TYPE?: { TEXT?: number; CONFIRM?: number };
+    };
+    const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const rows = roots.map((r, i) => {
+        const created = r.createdTime ? new Date(r.createdTime).toLocaleString() : 'unknown date';
+        return `<label><input type="radio" name="ts_drive_root" value="${esc(r.id)}" ${i === 0 ? 'checked' : ''} /> ` +
+            `TavernSync <small>(${esc(created)} · ${esc(r.id.slice(0, 8))}…)</small></label><br/>`;
+    }).join('');
+    const html = `<div class="tavernsync-pick-root"><p><b>พบโฟลเดอร์ TavernSync หลายอันใน Google Drive</b></p>` +
+        `<p>เลือกอันที่ต้องการใช้ซิงก์ (ทุกเครื่องต้องเลือกอันเดียวกัน):</p>${rows}</div>`;
+
+    if (typeof ctx.callGenericPopup === 'function') {
+        const ok = await ctx.callGenericPopup(html, ctx.POPUP_TYPE?.CONFIRM ?? 1);
+        if (!ok) return null;
+        const selected = document.querySelector('input[name="ts_drive_root"]:checked') as HTMLInputElement | null;
+        return selected?.value ?? null;
+    }
+    const list = roots.map((r, i) => `${i + 1}. created ${r.createdTime ?? 'unknown'} (${r.id.slice(0, 8)}…)`).join('\n');
+    const ans = window.prompt(`พบโฟลเดอร์ TavernSync หลายอัน:\n${list}\n\nพิมพ์หมายเลขที่ต้องการใช้`, '1');
+    const idx = Number(ans) - 1;
+    return roots[idx]?.id ?? null;
+}
+
+async function handleDriveConnect(): Promise<void> {
+    const s = getSettings();
+    if (!s.driveClientId.trim()) {
+        toastr.warning('ใส่ Google Client ID ก่อน (สร้างที่ Google Cloud Console)', 'TavernSync');
+        return;
+    }
+    try {
+        await withLoader('Connecting to Google Drive…', async () => {
+            const client = makeDriveClient();
+            let layout: DriveLayout;
+            try {
+                // ปุ่มนี้คือ user gesture — token ครั้งแรกจะเด้ง consent ที่นี่
+                layout = await discoverDriveLayout(client, s.driveFolderId.trim() || undefined);
+            } catch (e) {
+                if (!(e instanceof MultipleRootsError)) throw e;
+                const picked = await pickDriveRoot(e.roots);
+                if (!picked) throw new Error('ยังไม่ได้เลือกโฟลเดอร์ TavernSync');
+                layout = await discoverDriveLayout(client, picked);
+            }
+            s.driveFolderId = layout.rootId;
+            // salt ของบัญชี derive จาก folderId (deterministic ทุกเครื่อง) — unlockE2ee ใช้ค่านี้ต่อได้เลย
+            s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(layout.rootId));
+            saveSettings();
+            const q = await client.getQuota();
+            const blobs = await client.listChildren(layout.blobsId);
+            $('#tavernsync_quota_line').text(
+                `Google Drive: ${formatBytes(q.usedBytes)} / ${formatBytes(q.limitBytes)} · TavernSync ${blobs.length} files`,
+            );
+        });
+        toastr.success('Connected to Google Drive — ปลดล็อก passphrase แล้ว Push/Pull ได้เลย', 'TavernSync');
+    } catch (e) {
+        console.error(LOG_PREFIX, e);
+        toastr.error(`Connect failed: ${String(e)}`, 'TavernSync');
+    }
+}
+
+async function handleDriveDisconnect(): Promise<void> {
+    try {
+        await driveProvider?.revoke();
+        driveProvider = null;
+        toastr.info('Disconnected Google — token บนเครื่องนี้ถูก revoke แล้ว (ข้อมูลบน Drive ยังอยู่)', 'TavernSync');
+    } catch (e) {
+        console.error(LOG_PREFIX, e);
+        toastr.error(`Disconnect failed: ${String(e)}`, 'TavernSync');
+    }
+}
+
+async function handleDriveGc(): Promise<void> {
+    const s = getSettings();
+    if (s.backendMode !== 'drive') return;
+    if (!s.driveClientId.trim() || !s.driveFolderId.trim()) {
+        toastr.warning('Connect Google ก่อน แล้วค่อย clean up', 'TavernSync');
+        return;
+    }
+    const ok = window.confirm(
+        'ลบข้อมูลเก่าบน Google Drive?\n\n' +
+        'จะย้ายไปถังขยะ: blob ที่ไม่มี commit ไหนอ้างถึงและเก่ากว่า 7 วัน + commit เก่าที่เกิน 10 ตัวล่าสุด\n' +
+        '(จะไม่ทำถ้ามี fork ค้างอยู่ — ซิงก์ให้เสร็จก่อน)',
+    );
+    if (!ok) return;
+    try {
+        const res = await withLoader('Cleaning up old data on Drive…', async () => {
+            const rt = await requireRuntime();
+            const client = makeDriveClient();
+            const layout = await discoverDriveLayout(client, s.driveFolderId.trim());
+            return collectGarbage(client, rt.storage as DriveAdapter, layout, rt.crypto);
+        });
+        toastr.success(`Clean up เสร็จ — trash ${res.trashedBlobs} blobs + ${res.trashedCommits} commits`, 'TavernSync');
+    } catch (e) {
+        console.error(LOG_PREFIX, e);
+        toastr.error(`Clean up failed: ${String(e)}`, 'TavernSync');
+    }
 }
 
 async function handleScan(opts?: { quiet?: boolean }): Promise<void> {
@@ -304,7 +453,20 @@ async function handleUnlockE2ee(): Promise<void> {
 function bindSettingsHandlers(): void {
     $(document).on('change', '#tavernsync_backend_mode', (e: { target: HTMLSelectElement }) => {
         const value = String($(e.target).val() || 'custom');
-        getSettings().backendMode = value === 'managed' ? 'managed' : 'custom';
+        const s = getSettings();
+        s.backendMode = value === 'managed' || value === 'drive' ? value : 'custom';
+        if (s.backendMode === 'drive') {
+            // E2EE บังคับสำหรับ Drive — ล็อก checkbox ไว้เลย
+            s.e2eeEnabled = true;
+            $('#tavernsync_e2ee').prop('checked', true);
+        }
+        saveSettings();
+        updateBackendFieldsVisibility();
+        updateE2eeUi();
+    });
+
+    $(document).on('input', '#tavernsync_client_id', (e: { target: HTMLInputElement }) => {
+        getSettings().driveClientId = String($(e.target).val() || '').trim();
         saveSettings();
     });
 
@@ -377,6 +539,9 @@ function bindSettingsHandlers(): void {
     });
 
     $(document).on('click', '#tavernsync_connect', () => { void handleConnect(); });
+    $(document).on('click', '#tavernsync_google_connect', () => { void handleDriveConnect(); });
+    $(document).on('click', '#tavernsync_google_disconnect', () => { void handleDriveDisconnect(); });
+    $(document).on('click', '#tavernsync_gc', () => { void handleDriveGc(); });
     $(document).on('click', '#tavernsync_push', () => { void handlePush(); });
     $(document).on('click', '#tavernsync_pull', () => { void handlePull(); });
     $(document).on('click', '#tavernsync_status_btn', () => { void handleStatus(); });
