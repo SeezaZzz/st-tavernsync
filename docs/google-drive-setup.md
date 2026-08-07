@@ -25,11 +25,11 @@
 
 ## ขั้นที่ 3: สร้าง OAuth Client ID (Web application)
 
-TavernSync ใช้ **Google Identity Services (GIS) token model** — ขอ access token ฝั่งเบราว์เซอร์ตรง ๆ (implicit/token flow) ไม่มี redirect กลับมาที่แอป จึงใช้ Client ID แบบ **Web application** ที่ต้อง whitelist เฉพาะ **Authorized JavaScript origins** (ไม่ต้องใส่ redirect URI)
+TavernSync ขอ access token ฝั่งเบราว์เซอร์ตรง ๆ (implicit/token flow) — ใช้ Client ID แบบ **Web application** ที่ต้อง whitelist ทั้ง **Authorized JavaScript origins** และ **Authorized redirect URIs** (ใส่ค่าเดียวกัน — origin ของ SillyTavern)
 
 1. ไปที่ **Google Auth Platform → Clients → Create OAuth client** (หรือปุ่ม **Create OAuth client** ในหน้า Overview)
 2. Application type: **Web application**
-3. ช่อง **Authorized JavaScript origins** ใส่ origin ของ SillyTavern ให้ตรง **scheme + host + port** เป๊ะ ๆ เช่น:
+3. ช่อง **Authorized JavaScript origins** และช่อง **Authorized redirect URIs** ใส่ origin ของ SillyTavern **เหมือนกันทั้งสองช่อง** ให้ตรง **scheme + host + port** เป๊ะ ๆ เช่น:
    - เปิดบนเครื่องตัวเอง: `http://localhost:8000` (หรือพอร์ตที่ ST ของคุณใช้จริง)
    - เข้าจากเครื่องอื่นด้วยโดเมน: `https://st.example.com` — **origin ที่ไม่ใช่ localhost ต้องเป็น HTTPS เท่านั้น**
    - **IP LAN ดิบ ๆ (เช่น `http://192.168.1.10:8000`) ใช้ไม่ได้** — Google ไม่ยอมรับ ต้องตั้ง hostname หรือใช้ tunnel ที่เป็น HTTPS แทน

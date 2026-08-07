@@ -106,15 +106,44 @@ describe('GisTokenProvider', () => {
         expect(instances[0].calls).toHaveLength(1);
     });
 
-    it('prompt ว่างเจอ interaction_required → escalate เป็น consent บน instance เดิม', async () => {
-        const instances = installGisGlobals((inst, o) => {
-            if (o.prompt === '') inst.callback({ error: 'interaction_required' });
-            else inst.callback({ access_token: 'tok_consent', expires_in: 3600 });
-        });
+    it('prompt ว่างเจอ interaction_required → fallback ไป popup implicit flow ของตัวเอง', async () => {
+        installGisGlobals(inst => inst.callback({ error: 'interaction_required' }));
+        const google = (window as unknown as { google: unknown }).google;
+        const fakePopup: { closed: boolean; location: { href: string }; close: () => void } = {
+            closed: false,
+            location: { href: 'http://localhost:8000/#access_token=tok_popup&expires_in=3600' },
+            close: () => { fakePopup.closed = true; },
+        };
+        const open = vi.fn(() => fakePopup as never);
+        vi.stubGlobal('window', { google, location: { origin: 'http://localhost:8000' }, open });
+
         const p = new GisTokenProvider('cid');
-        await expect(p.getToken()).resolves.toBe('tok_consent');
-        expect(instances).toHaveLength(1);
-        expect(instances[0].calls).toEqual([{ prompt: '' }, { prompt: 'consent' }]);
+        await expect(p.getToken()).resolves.toBe('tok_popup');
+        expect(open).toHaveBeenCalledTimes(1);
+        const url = String(open.mock.calls[0]?.[0]);
+        expect(url).toContain('client_id=cid');
+        expect(url).toContain('redirect_uri=http%3A%2F%2Flocalhost%3A8000');
+        expect(url).toContain('response_type=token');
+        expect(url).toContain('prompt=consent');
+        expect(fakePopup.closed).toBe(true);
+    });
+
+    it('getTokenInteractive ข้าม GIS ไป popup implicit flow ตรง ๆ', async () => {
+        const fakePopup = {
+            closed: false,
+            location: { href: 'http://localhost:8000/#access_token=tok_direct&expires_in=3600' },
+            close: () => { fakePopup.closed = true; },
+        };
+        const open = vi.fn(() => fakePopup as never);
+        vi.stubGlobal('window', { location: { origin: 'http://localhost:8000' }, open });
+
+        const p = new GisTokenProvider('cid');
+        await expect(p.getTokenInteractive()).resolves.toBe('tok_direct');
+        expect(open).toHaveBeenCalledTimes(1);
+        expect(String(open.mock.calls[0]?.[0])).toContain('prompt=consent');
+        // cache ใช้ต่อได้ — ไม่เปิด popup ซ้ำ
+        await expect(p.getTokenInteractive()).resolves.toBe('tok_direct');
+        expect(open).toHaveBeenCalledTimes(1);
     });
 
     it('getToken พร้อมกันก่อน resolve → requestAccessToken ครั้งเดียว แชร์ token เดียวกัน', async () => {

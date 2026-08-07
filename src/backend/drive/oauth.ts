@@ -59,15 +59,69 @@ export class GisTokenProvider implements DriveTokenProvider {
     async getTokenInteractive(): Promise<string> {
         if (this.token && Date.now() < this.expiresAt - 30_000) return this.token;
         if (this.inflight) return this.inflight;
-        this.inflight = (async () => {
-            const client = this.loadClient ? await this.loadClient() : await this.loadGisClient();
-            return this.requestOnce(client, 'consent');
-        })();
+        // ใช้ popup implicit flow ของเราเอง ไม่ผ่าน GIS iframe — GIS callback หายเงียบ ๆ
+        // ในบางเบราว์เซอร์ (3p storage ถูกบล็อก) ทำให้ Connect ค้างทั้งที่ผู้ใช้ consent สำเร็จแล้ว
+        this.inflight = this.requestViaPopup('consent');
         try {
             return await this.inflight;
         } finally {
             this.inflight = null;
         }
+    }
+
+    /** OAuth implicit flow แบบเขียนเอง: เปิด popup ไป accounts.google.com แล้วรอ redirect กลับมาที่
+     *  origin ของเราพร้อม #access_token — ไม่พึ่ง GIS iframe/third-party storage เลย
+     *  ต้อง whitelist origin นี้ใน Authorized redirect URIs ของ Client ID ด้วย */
+    private requestViaPopup(prompt: string): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const redirectUri = window.location.origin;
+            const url =
+                'https://accounts.google.com/o/oauth2/v2/auth' +
+                `?client_id=${encodeURIComponent(this.clientId)}` +
+                `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+                '&response_type=token' +
+                `&scope=${encodeURIComponent(SCOPE)}` +
+                `&prompt=${encodeURIComponent(prompt)}` +
+                '&include_granted_scopes=true';
+            console.debug('[TavernSync]', `opening OAuth popup (redirect back to ${redirectUri})…`);
+            const popup = window.open(url, 'tavernsync-oauth', 'width=520,height=640');
+            if (!popup) {
+                reject(new Error('เปิดหน้าต่าง Google sign-in ไม่ได้ — popup ถูกบล็อก กดอนุญาต popup ของเว็บนี้ก่อน'));
+                return;
+            }
+            const finish = (fn: () => void) => {
+                clearInterval(poller);
+                clearTimeout(timer);
+                try { popup.close(); } catch { /* cross-origin แล้วแต่กรณี */ }
+                fn();
+            };
+            const poller = setInterval(() => {
+                if (popup.closed) {
+                    finish(() => reject(new GisError('popup_closed')));
+                    return;
+                }
+                let href: string;
+                try {
+                    href = popup.location.href; // cross-origin จะ throw จนกว่าจะ redirect กลับมาที่ origin เรา
+                } catch {
+                    return;
+                }
+                const hash = new URLSearchParams(new URL(href).hash.slice(1));
+                const token = hash.get('access_token');
+                const err = hash.get('error');
+                if (token) {
+                    this.token = token;
+                    this.expiresAt = Date.now() + Number(hash.get('expires_in') ?? 3600) * 1000;
+                    console.debug('[TavernSync]', 'OAuth token acquired via popup redirect');
+                    finish(() => resolve(this.token!));
+                } else {
+                    finish(() => reject(new GisError(err ?? 'unknown')));
+                }
+            }, 250);
+            const timer = setTimeout(() => {
+                finish(() => reject(new Error('Google sign-in ไม่ตอบกลับใน 2 นาที — ถ้า popup ฟ้อง redirect_uri_mismatch ให้เพิ่ม origin นี้ใน Authorized redirect URIs ของ Client ID')));
+            }, 120_000);
+        });
     }
 
     private async requestToken(): Promise<string> {
@@ -76,11 +130,12 @@ export class GisTokenProvider implements DriveTokenProvider {
             // default prompt ว่าง — ใช้ session เดิมเงียบ ๆ (auto-sync ไม่มี gesture ก็ผ่านถ้าเคย consent)
             return await this.requestOnce(client, '');
         } catch (e) {
-            // escalate เฉพาะ error ที่บอกว่าต้องมี interaction — อื่น ๆ (access_denied ฯลฯ) โยนต่อ
-            if (e instanceof GisError && e.code === INTERACTION_REQUIRED) {
-                return this.requestOnce(client, 'consent');
-            }
-            throw e;
+            // error ที่ต้องให้ผู้ใช้เลือกเอง (access_denied ฯลฯ) โยนต่อ ไม่ fallback
+            if (e instanceof GisError && e.code !== INTERACTION_REQUIRED) throw e;
+            // interaction_required หรือ GIS ค้าง/timeout → fallback popup implicit flow ของเราเอง
+            // (ถ้าไม่ได้อยู่ใน gesture window popup จะโดนบล็อกและฟ้อง error ชัดเจนแทนที่จะค้าง)
+            console.debug('[TavernSync]', 'silent GIS path failed, falling back to popup flow:', e);
+            return this.requestViaPopup('consent');
         }
     }
 
