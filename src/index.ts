@@ -44,10 +44,16 @@ function getCtx() {
 }
 
 // หน้าต่าง popup OAuth: Google redirect กลับมาที่ origin root พร้อม #access_token ใน hash —
-// ส่งต่อให้หน้าหลักผ่าน localStorage แล้วปิดตัวเอง (ไม่พึ่ง popup handle เพราะ COOP ของ Google ทำ handle ตาย)
-if (window.name === 'tavernsync-oauth' && window.location.hash.length > 1) {
+// ส่งต่อให้หน้าหลักผ่าน localStorage แล้วปิดตัวเอง
+// (ดักจาก hash ล้วน ๆ — window.name/opener โดนเบราว์เซอร์รีเซ็ตหรือ COOP ตัดระหว่าง redirect ข้ามโดเมน)
+if (/(^#|[#&])(access_token|error)=/.test(window.location.hash)) {
     try { localStorage.setItem('tavernsync_oauth_hash', window.location.hash); } catch { /* ignore */ }
+    console.debug('[TavernSync]', 'oauth hash captured in popup window — closing');
     window.close();
+    // ถ้าเบราว์เซอร์ไม่ยอมให้ปิดตัวเอง อย่างน้อยก็บอกผู้ใช้แทนที่จะโหลด ST เต็มหน้าต่าง
+    window.addEventListener('DOMContentLoaded', () => {
+        document.body.innerHTML = '<p style="font-family:sans-serif;padding:2em">TavernSync เชื่อมต่อแล้ว — ปิดหน้าต่างนี้ได้เลย</p>';
+    });
 }
 
 function setStatusLine(text: string): void {
