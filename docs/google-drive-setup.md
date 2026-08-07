@@ -9,22 +9,25 @@
 ## ขั้นที่ 1: สร้าง Google Cloud project + เปิด Drive API
 
 1. เปิด [Google Cloud Console](https://console.cloud.google.com/) ล็อกอินด้วยบัญชี Google ที่จะใช้เก็บข้อมูลซิงก์
-2. สร้าง project ใหม่ (ชื่ออะไรก็ได้ เช่น `tavernsync`)
-3. ไปที่ **APIs & Services → Library** → ค้นหา **Google Drive API** → กด **Enable**
+2. สร้าง project ใหม่ (ชื่ออะไรก็ได้ เช่น `tavernsync`) — ถ้ามี project อยู่แล้วใช้อันเดิมได้
+3. พิมพ์ **"Google Drive API"** ในแถบค้นหาบนสุดของ Console → เปิดขึ้นมา → กด **Enable**
 
-## ขั้นที่ 2: ตั้ง OAuth consent screen
+## ขั้นที่ 2: ตั้งค่า Google Auth Platform (ชื่อแอป + ผู้ใช้ทดสอบ)
 
-1. ไปที่ **APIs & Services → OAuth consent screen**
-2. เลือก **External** → กรอกชื่อแอป (เช่น `TavernSync`) + อีเมลติดต่อ → กดผ่านไปจนจบ
-3. ปล่อยอยู่ใน **โหมด Testing** ได้เลย (ไม่ต้องยื่น verify กับ Google)
+> หน้า Console ปัจจุบันรวมการตั้งค่า OAuth ไว้ที่เมนู **Google Auth Platform** (ถ้าเมนูซ้ายไม่เห็น ให้พิมพ์ "Google Auth Platform" ในแถบค้นหาบนสุด)
+
+1. ไปที่ **Google Auth Platform → Branding** → ใส่ชื่อแอป (เช่น `TavernSync`) + อีเมลติดต่อ → Save
+2. ไปที่ **Google Auth Platform → Audience** → เลือก **External**
+   - ปล่อยอยู่ใน **โหมด Testing** ได้เลย (ไม่ต้องยื่น verify กับ Google)
    - **ข้อจำกัด:** โหมด Testing จำกัด **ผู้ใช้ทดสอบไม่เกิน 100 คน** และ token จะหมดอายุบ่อยกว่าโหมด Production
-   - **สำคัญ:** ต้องเพิ่มอีเมล Google ของตัวเองเป็น **Test user** (หน้า OAuth consent screen → หัวข้อ Test users → Add users) ไม่อย่างนั้นหน้าต่าง sign-in จะฟ้องว่าไม่มีสิทธิ์เข้าถึง
+   - **สำคัญ:** ในหน้า Audience เดียวกัน หัวข้อ **Test users → Add users** → เพิ่มอีเมล Google ของตัวเอง ไม่อย่างนั้นหน้าต่าง sign-in จะฟ้องว่าไม่มีสิทธิ์เข้าถึง
+3. ไปที่ **Google Auth Platform → Data Access → Add or remove scopes** → ค้นหา/ติ๊ก `https://www.googleapis.com/auth/drive.file` → Save (scope เดียวพอ — เห็น/แตะได้เฉพาะไฟล์และโฟลเดอร์ที่ TavernSync สร้างเอง อ่านไฟล์อื่นใน Drive ของคุณไม่ได้)
 
 ## ขั้นที่ 3: สร้าง OAuth Client ID (Web application)
 
 TavernSync ใช้ **Google Identity Services (GIS) token model** — ขอ access token ฝั่งเบราว์เซอร์ตรง ๆ (implicit/token flow) ไม่มี redirect กลับมาที่แอป จึงใช้ Client ID แบบ **Web application** ที่ต้อง whitelist เฉพาะ **Authorized JavaScript origins** (ไม่ต้องใส่ redirect URI)
 
-1. ไปที่ **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+1. ไปที่ **Google Auth Platform → Clients → Create OAuth client** (หรือปุ่ม **Create OAuth client** ในหน้า Overview)
 2. Application type: **Web application**
 3. ช่อง **Authorized JavaScript origins** ใส่ origin ของ SillyTavern ให้ตรง **scheme + host + port** เป๊ะ ๆ เช่น:
    - เปิดบนเครื่องตัวเอง: `http://localhost:8000` (หรือพอร์ตที่ ST ของคุณใช้จริง)
