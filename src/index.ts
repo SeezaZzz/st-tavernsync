@@ -71,6 +71,7 @@ function updateE2eeUi(): void {
 
     if (!s.e2eeEnabled) {
         $status.text('Encryption: off');
+        $status.css('color', '');
         $setup.hide();
         return;
     }
@@ -78,16 +79,18 @@ function updateE2eeUi(): void {
     if (unlocked) {
         $status.text(
             s.e2eeRequireSessionUnlock
-                ? 'Encryption: unlocked for this page'
-                : 'Encryption: ready on this device',
+                ? '● ปลดล็อกแล้ว (เฉพาะหน้านี้)'
+                : '● ปลดล็อกแล้ว พร้อมซิงก์',
         );
+        $status.css('color', '#66bb6a');
         $setup.hide();
     } else {
         $status.text(
             s.e2eeRequireSessionUnlock
-                ? 'Encryption: enter passphrase to sync'
-                : 'Encryption: unlock once on this device',
+                ? '● ยังไม่ได้ปลดล็อก — ใส่ passphrase ก่อนซิงก์'
+                : '● ยังไม่ได้ปลดล็อก — ใส่ passphrase (ครั้งเดียวต่อเครื่อง)',
         );
+        $status.css('color', '#ef5350');
         $setup.show();
     }
 }
