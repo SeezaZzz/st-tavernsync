@@ -273,6 +273,7 @@ async function handleDriveConnect(): Promise<void> {
             let layout: DriveLayout;
             try {
                 // ปุ่มนี้คือ user gesture — token ครั้งแรกจะเด้ง consent ที่นี่
+                console.debug(LOG_PREFIX, 'drive connect: discover layout (ขอ token + หา/สร้างโฟลเดอร์)…');
                 layout = await discoverDriveLayout(client, s.driveFolderId.trim() || undefined);
             } catch (e) {
                 if (!(e instanceof MultipleRootsError)) throw e;
@@ -280,6 +281,7 @@ async function handleDriveConnect(): Promise<void> {
                 if (!picked) throw new Error('ยังไม่ได้เลือกโฟลเดอร์ TavernSync');
                 layout = await discoverDriveLayout(client, picked);
             }
+            console.debug(LOG_PREFIX, `drive connect: layout ready (root=${layout.rootId.slice(0, 8)}…)`);
             s.driveFolderId = layout.rootId;
             // salt ของบัญชี derive จาก folderId (deterministic ทุกเครื่อง) — unlockE2ee ใช้ค่านี้ต่อได้เลย
             s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(layout.rootId));

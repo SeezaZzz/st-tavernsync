@@ -70,18 +70,26 @@ export class GisTokenProvider implements DriveTokenProvider {
 
     private requestOnce(client: GisTokenClient, prompt: string): Promise<string> {
         return new Promise((resolve, reject) => {
+            // กันค้างนิรันดร์ — GIS ไม่มี timeout ของตัวเอง ถ้า popup โดนบล็อกเงียบ ๆ หรือ callback ไม่ยิง promise จะแขวนตลอด
+            const timer = setTimeout(() => {
+                reject(new Error(`Google sign-in ไม่ตอบกลับใน 2 นาที (prompt:'${prompt}') — เช็กว่า popup ถูกบล็อก หรือ accounts.google.com โดน adblock/tracking prevention`));
+            }, 120_000);
             const cb = (resp: GisTokenResponse) => {
+                clearTimeout(timer);
                 if (resp.access_token) {
                     this.token = resp.access_token;
                     this.expiresAt = Date.now() + (resp.expires_in ?? 3600) * 1000;
+                    console.debug('[TavernSync]', `GIS token acquired (expires_in=${resp.expires_in ?? '?'}s)`);
                     resolve(this.token);
                 } else {
+                    console.debug('[TavernSync]', `GIS error response (prompt:'${prompt}'):`, resp.error);
                     reject(new GisError(resp.error ?? 'unknown'));
                 }
             };
             // ติด callback บน instance เดียวกับที่จะ requestAccessToken — ห้าม init client ใหม่
             if (this.setCallback) this.setCallback(cb);
             else client.callback = cb;
+            console.debug('[TavernSync]', `requestAccessToken prompt:'${prompt}'`);
             client.requestAccessToken({ prompt });
         });
     }
@@ -98,13 +106,19 @@ export class GisTokenProvider implements DriveTokenProvider {
 
     private async loadGisClient(): Promise<GisTokenClient> {
         if (this.client) return this.client;
+        console.debug('[TavernSync]', 'loading GIS script (accounts.google.com/gsi/client)…');
         await new Promise<void>((resolve, reject) => {
+            // กันค้าง — ถ้าสคริปต์โดนบล็อกเงียบ ๆ (adblock/tracking prevention) onload/onerror อาจไม่ยิงเลย
+            const timer = setTimeout(() => {
+                reject(new Error('โหลดสคริปต์ Google (accounts.google.com/gsi/client) ไม่สำเร็จใน 20 วินาที — อาจโดน adblock หรือ Edge tracking prevention บล็อก'));
+            }, 20_000);
             const s = document.createElement('script');
             s.src = GIS_SRC;
-            s.onload = () => resolve();
-            s.onerror = () => reject(new Error('โหลด Google Identity Services ไม่สำเร็จ'));
+            s.onload = () => { clearTimeout(timer); resolve(); };
+            s.onerror = () => { clearTimeout(timer); reject(new Error('โหลด Google Identity Services ไม่สำเร็จ — เช็ก adblock/tracking prevention')); };
             document.head.appendChild(s);
         });
+        console.debug('[TavernSync]', 'GIS script loaded, init token client');
         const g = (window as unknown as { google: GisGlobal }).google;
         this.client = g.accounts.oauth2.initTokenClient({
             client_id: this.clientId,
