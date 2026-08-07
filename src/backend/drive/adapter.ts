@@ -107,20 +107,22 @@ export class DriveAdapter implements StorageAdapter {
         const current = heads.length ? await revisionOfHeads(heads) : '0';
         if (current !== ifRevision) throw new ConflictError();
 
-        const data = await this.crypto.encodeManifest(m);
         // ถ้า heads > MAX_PARENTS: สร้าง merge commit กลางเป็นลำดับ (manifest เดียวกัน) จนเหลือ ≤4 parents
         while (heads.length > MAX_PARENTS) {
             const group = heads.slice(0, MAX_PARENTS);
             const parents = group.map(h => h.commitId);
-            const { fileId, commitId } = await this.writeCommit(data, parents);
+            const { fileId, commitId } = await this.writeCommit(m, parents);
             heads = [{ id: fileId, commitId, parents, createdTime: '' }, ...heads.slice(MAX_PARENTS)];
         }
-        const { commitId } = await this.writeCommit(data, heads.map(h => h.commitId));
+        const { commitId } = await this.writeCommit(m, heads.map(h => h.commitId));
         return { revision: await revisionOfHeads([{ id: '', commitId, parents: [], createdTime: '' }]) };
     }
 
-    /** สร้าง commit ไฟล์ใหม่; คืนทั้ง Drive file id และ commitId (32 hex จาก SHA-256 ของ ciphertext) */
-    private async writeCommit(data: Uint8Array, parents: string[]): Promise<{ fileId: string; commitId: string }> {
+    /** สร้าง commit ไฟล์ใหม่; คืนทั้ง Drive file id และ commitId (32 hex จาก SHA-256 ของ ciphertext).
+     *  encode manifest ใหม่ทุกครั้ง — AES-GCM มี IV สุ่ม → ciphertext ต่างกัน → commitId ไม่ชนกัน
+     *  (ป้องกัน self-edge ตอน rollup และ re-push manifest เดิม) */
+    private async writeCommit(m: Manifest, parents: string[]): Promise<{ fileId: string; commitId: string }> {
+        const data = await this.crypto.encodeManifest(m);
         const digest = await crypto.subtle.digest('SHA-256', data as BufferSource);
         const commitId = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, COMMIT_ID_LEN);
         const appProperties: Record<string, string> = { ts: 'commit-v1' };

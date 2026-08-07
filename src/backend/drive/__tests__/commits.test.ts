@@ -50,11 +50,17 @@ describe('commit graph', () => {
     });
 });
 
+// encodeManifest ต้อง non-deterministic ให้เหมือน AES-GCM seal จริง (IV สุ่มทุกครั้ง)
+// — ถ้า deterministic, commitId จาก SHA-256(ciphertext) จะชนกันและ test จะจับ self-edge bug ไม่ได้
+let sealCounter = 0;
 const cryptoStub: BackendCrypto = {
     encryptBlob: async d => d,
     decryptBlob: async d => d,
-    encodeManifest: async m => new TextEncoder().encode(JSON.stringify(m)),
-    decodeManifest: async d => JSON.parse(new TextDecoder().decode(d)),
+    encodeManifest: async m => new TextEncoder().encode(JSON.stringify({ _seal: sealCounter++, m })),
+    decodeManifest: async d => {
+        const o = JSON.parse(new TextDecoder().decode(d));
+        return o && typeof o === 'object' && '_seal' in o && 'm' in o ? o.m : o;
+    },
     blobNameFor: async h => 'hmac_' + h,
 };
 
@@ -72,6 +78,27 @@ function manifestClientStub(files: DriveFileMeta[], manifestByFileId: Record<str
         createFolder: vi.fn(async (name: string) => ({ id: 'new_' + name, name })),
         createFile: vi.fn(async (_p: string, name: string) => ({ id: 'up_' + name, name })),
         getFileData: vi.fn(async (id: string) => new TextEncoder().encode(JSON.stringify(manifestByFileId[id]))),
+        trashFile: vi.fn(async () => {}),
+        getQuota: vi.fn(async () => ({ usedBytes: 0, limitBytes: 15 })),
+        searchRootFolders: vi.fn(async () => []),
+    } as unknown as DriveClient;
+}
+
+/** stateful stub: createFile เพิ่มไฟล์เข้า list จริง + เก็บ data ไว้ให้ getFileData — ใช้ทดสอบ read-back หลัง push */
+function statefulManifestClient(initial: DriveFileMeta[] = []): DriveClient {
+    const files = [...initial];
+    const dataById = new Map<string, Uint8Array>();
+    return {
+        listChildren: vi.fn(async () => [...files]),
+        findChildByName: vi.fn(async (_p: string, name: string) => files.find(f => f.name === name) ?? null),
+        createFolder: vi.fn(async (name: string) => ({ id: 'new_' + name, name })),
+        createFile: vi.fn(async (_p: string, name: string, data: Uint8Array, appProperties?: Record<string, string>) => {
+            const meta: DriveFileMeta = { id: 'up_' + name, name, appProperties, createdTime: '2026-08-06T00:00:00Z' };
+            files.push(meta);
+            dataById.set(meta.id, data);
+            return { id: meta.id, name };
+        }),
+        getFileData: vi.fn(async (id: string) => dataById.get(id)!),
         trashFile: vi.fn(async () => {}),
         getQuota: vi.fn(async () => ({ usedBytes: 0, limitBytes: 15 })),
         searchRootFolders: vi.fn(async () => []),
@@ -124,13 +151,12 @@ describe('DriveAdapter manifest commits', () => {
         expect(snap.revision).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    it('putManifest เมื่อ heads > 4 → สร้าง merge commit กลาง (≤4 parents) ก่อน commit สุดท้าย', async () => {
+    it('putManifest เมื่อ heads > 4 → สร้าง merge commit กลาง (≤4 parents) ก่อน commit สุดท้าย และ read-back เหลือ 1 head', async () => {
         const headIds = ['1', '2', '3', '4', '5'].map(c => c.repeat(32));
-        const files = headIds.map(id => commitFile(id));
-        const client = manifestClientStub(files);
+        const client = statefulManifestClient(headIds.map(id => commitFile(id)));
         const a = new DriveAdapter(client, cryptoStub, layout);
         const m = emptyManifest('dev', 9);
-        const revision = await revisionOfHeads(files.map(parseCommitMeta));
+        const revision = await revisionOfHeads(headIds.map(id => parseCommitMeta(commitFile(id))));
         const result = await a.putManifest(m, revision);
         expect(result.revision).toMatch(/^[0-9a-f]{64}$/);
         // commit กลาง 1 ตัว (parents = 4 heads แรก) + commit สุดท้าย (parents = กลาง + head ที่เหลือ)
@@ -144,5 +170,34 @@ describe('DriveAdapter manifest commits', () => {
         expect(finalProps.p1).toBe(headIds[4]);
         expect(finalProps).not.toHaveProperty('p2');
         expect(finalName).toMatch(/^[0-9a-f]{32}\.enc$/);
+        // ทุก commit ต้องมี commitId ต่างกัน (encode ใหม่ทุกครั้ง) — ไม่มี self-edge
+        expect(finalName).not.toBe(midName);
+        expect(finalProps.p0).not.toBe(finalName.replace(/\.enc$/, ''));
+        // read-back: heads ต้องเหลือ 1 และ manifest round-trip ได้
+        const commits = (await client.listChildren('m')).map(parseCommitMeta);
+        const heads = computeHeads(commits);
+        expect(heads).toHaveLength(1);
+        expect(heads[0].commitId).toBe(finalName.replace(/\.enc$/, ''));
+        const snap = await a.getSnapshot();
+        expect(snap.kind).toBe('single');
+        if (snap.kind !== 'single') return;
+        expect(snap.manifest).toEqual(m);
+        expect(snap.revision).toBe(result.revision);
+    });
+
+    it('re-push manifest เดิม (no-op) ต้องไม่ทำให้ heads หดเป็น 0', async () => {
+        const client = statefulManifestClient();
+        const a = new DriveAdapter(client, cryptoStub, layout);
+        const m = emptyManifest('dev', 3);
+        const first = await a.putManifest(m, '0');
+        const second = await a.putManifest(m, first.revision); // manifest เดิมเป๊ะ
+        expect(second.revision).toMatch(/^[0-9a-f]{64}$/);
+        expect(second.revision).not.toBe(first.revision); // commitId ต่างกันเพราะ encode ใหม่
+        const commits = (await client.listChildren('m')).map(parseCommitMeta);
+        expect(computeHeads(commits)).toHaveLength(1);
+        const snap = await a.getSnapshot();
+        expect(snap.kind).toBe('single');
+        if (snap.kind !== 'single') return;
+        expect(snap.manifest).toEqual(m);
     });
 });
