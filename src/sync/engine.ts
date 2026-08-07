@@ -12,6 +12,7 @@ import { applyLocalItem, decodeUtf8Jsonl, parseItemId, writeChat } from '../st-a
 import { stFetchJson } from '../st-adapter/http';
 import { conflictSiblingId, tryChatFastForward } from '../sync-core/conflict';
 import { diffManifests, summarizeDiff } from '../sync-core/diff';
+import { mergeManifestItems } from '../sync-core/merge';
 import { applyOp } from '../sync-core/apply';
 import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
@@ -448,9 +449,48 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
 
     progress('Fetching remote manifest…');
     const snap = await adapter.getSnapshot();
-    if (snap.kind !== 'single') throw new Error('fork unsupported on this backend');
-    let remote: Manifest | null = snap.manifest;
+    let remote: Manifest | null;
     let remoteVersion: StorageRevision = snap.revision;
+    if (snap.kind === 'single') {
+        remote = snap.manifest;
+    } else if (snap.heads.length === 0) {
+        remote = snap.commonAncestor;
+    } else {
+        // fork: 3-way merge heads เทียบ commonAncestor — conflict เข้า resolveConflicts เดิม
+        // (ห้ามตัดสินด้วย mtime/อายุ; merge ทีละ head โดย base คือ commonAncestor คงที่)
+        progress(`Fork detected (${snap.heads.length} heads) — merging…`);
+        const baseItems: Record<string, SyncItem> = snap.commonAncestor?.items ?? {};
+        let mergedItems: Record<string, SyncItem> = { ...baseItems };
+        for (const head of snap.heads) {
+            const r = mergeManifestItems(baseItems, mergedItems, head.manifest.items);
+            if (r.conflicts.length) {
+                let choices = new Map<string, ConflictChoice>();
+                if (opts.resolveConflicts) {
+                    choices = await opts.resolveConflicts(r.conflicts, opts.direction);
+                } else if (opts.resolveConflict) {
+                    for (const c of r.conflicts) {
+                        choices.set(c.id, await opts.resolveConflict(c));
+                    }
+                }
+                for (const c of r.conflicts) {
+                    // Safe default เหมือน conflict path เดิม: pull → remote, อื่น ๆ → skip
+                    const fallback: ConflictChoice =
+                        opts.direction === 'pull' ? 'remote' : 'skip';
+                    const choice = choices.get(c.id) || fallback;
+                    if (choice === 'local') {
+                        if (c.local) r.merged[c.id] = c.local;
+                    } else if (choice === 'remote' || choice === 'both') {
+                        // 'both': ฝั่ง remote ชนะใน manifest — local copy ของ device นี้ยังอยู่
+                        // และ diff ปกติข้างล่างจะเด้ง conflict UI อีกครั้ง (keep_both ทำที่ apply)
+                        if (c.remote) r.merged[c.id] = c.remote;
+                    }
+                    // 'skip' → เว้นไว้ (ไม่ใส่ merged)
+                }
+            }
+            mergedItems = r.merged;
+        }
+        remote = { ...snap.heads[0].manifest, items: mergedItems };
+    }
     const baseState = await loadBase();
 
     let entries = diffManifests(local, baseState?.manifest ?? null, remote);
@@ -689,9 +729,11 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             if (err instanceof ConflictError) {
                 progress('412 conflict — re-diff once…');
                 const again = await adapter.getSnapshot();
-                if (again.kind !== 'single') throw new Error('fork unsupported on this backend');
-                remote = again.manifest;
-                remoteVersion = again.revision;
+                if (again.kind === 'single') {
+                    remote = again.manifest;
+                    remoteVersion = again.revision;
+                }
+                // fork หรือ single ก็ abort เหมือนกัน — user retry แล้ว fork จะผ่าน merge path ข้างบน
                 throw new Error('Remote changed during push; please retry');
             }
             throw err;
