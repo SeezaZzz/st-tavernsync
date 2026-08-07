@@ -1,8 +1,12 @@
 import type { Manifest } from '../sync-core/types';
 import type { StorageAdapter } from './adapter';
 import { HttpStorageAdapter } from './http';
+import { DriveClient } from './drive/client';
+import { DriveAdapter, discoverDriveLayout } from './drive/adapter';
+import { GisTokenProvider } from './drive/oauth';
 import { getSettings } from '../settings';
-import { seal, open, decodeSalt, encodeSalt } from '../crypto';
+import { seal, open, decodeSalt, encodeSalt, exportKeyRaw } from '../crypto';
+import { deriveDriveSubkeys, driveSaltFromFolderIdAsync, hmacNameFor, type DriveSubkeys } from '../crypto/subkeys';
 // sessionKey ถูก engine จัดการ — import getter ที่ engine เปิดไว้ (ดู Step 4)
 import { getSessionKey } from '../sync/engine';
 
@@ -69,8 +73,46 @@ class HttpSaltProvider implements SaltProvider {
     }
 }
 
+/** Drive crypto: E2EE บังคับ — manifest เข้ารหัสทั้งก้อน (seal = IV สุ่มทุกครั้ง), ชื่อ blob = HMAC */
+export function makeDriveCrypto(subkeys: DriveSubkeys): BackendCrypto {
+    return {
+        encryptBlob: d => seal(subkeys.blobEnc, d),
+        async decryptBlob(data, expectedPlaintextHash) {
+            const pt = await open(subkeys.blobEnc, data);
+            if ((await sha256Hex(pt)) !== expectedPlaintextHash) throw new Error('blob hash mismatch');
+            return pt;
+        },
+        encodeManifest: m => seal(subkeys.manifestEnc, new TextEncoder().encode(JSON.stringify(m))),
+        decodeManifest: async d => JSON.parse(new TextDecoder().decode(await open(subkeys.manifestEnc, d))) as Manifest,
+        blobNameFor: h => hmacNameFor(subkeys.blobName, h),
+    };
+}
+
+class DriveSaltProvider implements SaltProvider {
+    constructor(private folderId: string) {}
+    async getSalt() { return driveSaltFromFolderIdAsync(this.folderId); }
+    async ensureSalt(_local: Uint8Array) { return driveSaltFromFolderIdAsync(this.folderId); } // deterministic — ไม่สน local
+}
+
 export async function requireRuntime(): Promise<BackendRuntime> {
     const s = getSettings();
+    if (s.backendMode === 'drive') {
+        if (!s.driveClientId.trim()) throw new Error('No Google Client ID configured');
+        const provider = new GisTokenProvider(s.driveClientId.trim());
+        const client = new DriveClient(provider);
+        const layout = await discoverDriveLayout(client); // MultipleRootsError → UI จับใน Task 9
+        // sessionKey (passphrase-derived, extractable) ต้องพร้อมก่อน — engine gate อยู่แล้ว (runSync เช็ก E2EE ก่อน)
+        const sk = getSessionKey();
+        if (!sk) throw new Error('Drive backend บังคับ E2EE — ปลดล็อก passphrase ก่อน');
+        const subkeys = await deriveDriveSubkeys(await exportKeyRaw(sk), layout.rootId);
+        const crypto = makeDriveCrypto(subkeys);
+        return {
+            storage: new DriveAdapter(client, crypto, layout),
+            crypto,
+            saltProvider: new DriveSaltProvider(layout.rootId),
+            storageNamespace: `drive:${layout.rootId}`,
+        };
+    }
     if (!s.endpoint.trim()) throw new Error('No endpoint configured');
     if (!s.deviceToken.trim()) throw new Error('No device token configured');
     const storage = new HttpStorageAdapter({ endpoint: s.endpoint.trim(), deviceToken: s.deviceToken.trim() });
