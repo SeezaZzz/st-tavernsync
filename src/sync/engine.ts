@@ -20,6 +20,7 @@ import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
 import { emptyManifest } from '../sync-core/types';
 import { LEGACY_BASE_KEY, baseStorageKey, e2eeKeyStorageKey, getSyncStore } from '../state/store';
 import { createPushHandlers } from './push-batch';
+import { PullCrashJournal, type PullCrashUpdate, type PullStage } from './pull-crash-journal';
 
 export interface BaseState {
     manifest: Manifest;
@@ -652,8 +653,22 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
     let personasChanged = false;
     const pullAppliedIds = new Set<string>();
     let pullSkipped = 0;
+    const pullJournal = typeof localStorage === 'undefined' ? null : new PullCrashJournal(localStorage);
+    if (opts.direction === 'pull' || opts.direction === 'both') pullJournal?.startRun();
+    const remoteItems = new Map(entries.flatMap((entry) => entry.remote ? [[entry.id, entry.remote] as const] : []));
+    const checkpoint = (id: string, type: SyncItem['type'], hash: string, stage: PullStage): void => {
+        const item: PullCrashUpdate = {
+            id,
+            type,
+            hash,
+            size: remoteItems.get(id)?.size ?? 0,
+            stage,
+        };
+        pullJournal?.update(item);
+    };
 
     const preparePull = async (id: string, type: SyncItem['type'], hash: string): Promise<PreparedPull> => {
+        checkpoint(id, type, hash, 'downloading');
         let boxed: Uint8Array;
         try {
             boxed = await getRemoteBlob(rt, hash);
@@ -665,11 +680,13 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                     `Skipped ${id} — missing on the server. Push from the device that still has it.`,
                     'TavernSync',
                 );
+                pullJournal?.finish(id);
                 return async () => undefined;
             }
             throw e;
         }
 
+        checkpoint(id, type, hash, 'decrypting');
         let plain: Uint8Array;
         try {
             plain = await rt.crypto.decryptBlob(boxed, hash);
@@ -680,11 +697,15 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 `Skipped ${id} — could not read server copy (wrong key or corrupt).`,
                 'TavernSync',
             );
+            pullJournal?.finish(id);
             return async () => undefined;
         }
 
+        checkpoint(id, type, hash, 'prepared');
         return async () => {
+            checkpoint(id, type, hash, 'storing');
             await storeBlob(hash, plain);
+            checkpoint(id, type, hash, 'applying');
             if (type === 'settings') {
                 settingsChanged = true;
                 const pulled = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
@@ -697,6 +718,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 await applyLocalItem(id, type, plain, !!opts.dryRun);
             }
             pullAppliedIds.add(id);
+            pullJournal?.finish(id);
         };
     };
 
@@ -715,9 +737,11 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             const entry = entries.find((x) => x.id === id);
             if (!entry?.remote) return;
             const sibling = conflictSiblingId(id, s.deviceName || 'remote');
+            checkpoint(id, type, entry.remote.hash, 'downloading');
             let plain: Uint8Array;
             try {
                 const boxed = await getRemoteBlob(rt, entry.remote.hash);
+                checkpoint(id, type, entry.remote.hash, 'decrypting');
                 plain = await rt.crypto.decryptBlob(boxed, entry.remote.hash);
             } catch (e) {
                 console.error(LOG_PREFIX, 'keep_both: could not fetch remote', id, e);
@@ -725,9 +749,12 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                     `Could not save a second copy of ${id} (missing/broken on server). Your local file is unchanged.`,
                     'TavernSync',
                 );
+                pullJournal?.finish(id);
                 return;
             }
+            checkpoint(id, type, entry.remote.hash, 'storing');
             await storeBlob(entry.remote.hash, plain);
+            checkpoint(id, type, entry.remote.hash, 'applying');
 
             if (type === 'chat') {
                 const { parts } = parseItemId(sibling);
@@ -738,6 +765,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             } else {
                 await applyLocalItem(sibling, type, plain, !!opts.dryRun);
             }
+            pullJournal?.finish(id);
             toastr.warning(`Kept both copies for ${id}`, 'TavernSync');
         },
         tombstone: async (id) => {

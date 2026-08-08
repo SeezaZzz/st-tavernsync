@@ -37,6 +37,7 @@ import {
     unlockE2ee,
     wipeRemoteSyncData,
 } from './sync/engine';
+import { PullCrashJournal, formatInterruptedPull } from './sync/pull-crash-journal';
 import { promptConflicts } from './ui/conflict';
 
 function getCtx() {
@@ -68,6 +69,20 @@ function setStatusLine(text: string): void {
     if (el) {
         el.textContent = text.startsWith('●') ? text : `● ${text}`;
     }
+}
+
+function reportInterruptedPull(): void {
+    if (typeof localStorage === 'undefined') return;
+    const active = new PullCrashJournal(localStorage).read();
+    if (active.length === 0) return;
+
+    const details = formatInterruptedPull(active);
+    console.error(LOG_PREFIX, 'Previous Pull ended while these items were active:', details);
+    setStatusLine(`Pull ดับระหว่าง ${details}`);
+    toastr.error(
+        `รอบก่อนแอปดับระหว่าง ${details}`,
+        'TavernSync crash checkpoint',
+    );
 }
 
 function updateE2eeUi(): void {
@@ -782,6 +797,7 @@ jQuery(async () => {
         getSyncStore();
         await tryRestoreE2eeKey();
         await renderSettingsPanel();
+        reportInterruptedPull();
         registerSlashCommands();
         registerEventListeners();
         console.log(LOG_PREFIX, 'loaded', `build=${BUILD_ID}`);
