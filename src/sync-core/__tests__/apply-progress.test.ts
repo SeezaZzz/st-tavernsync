@@ -18,6 +18,29 @@ const push = (id: string): ApplyOp => ({ id, kind: 'push_blob', type: 'preset', 
 const skip = (id: string): ApplyOp => ({ id, kind: 'skip', type: 'preset' });
 
 describe('applyOp progress', () => {
+    it('ส่ง push ทั้งก้อนครั้งเดียวและนับ progress จากแต่ละรายการที่เสร็จ', async () => {
+        const seen: Array<[number, number]> = [];
+        const pushBlobs = vi.fn(async (
+            items: readonly { readonly id: string; readonly hash: string }[],
+            onProcessed: (item: { readonly id: string; readonly hash: string }) => void,
+        ) => {
+            for (const item of items) onProcessed(item);
+        });
+        const context = { ...ctx((p, t) => seen.push([p, t])), pushBlobs };
+
+        const result = await applyOp([push('a'), push('b'), push('c')], context);
+
+        expect(pushBlobs).toHaveBeenCalledOnce();
+        expect(pushBlobs).toHaveBeenCalledWith([
+            { id: 'a', hash: 'h-a' },
+            { id: 'b', hash: 'h-b' },
+            { id: 'c', hash: 'h-c' },
+        ], expect.any(Function));
+        expect(context.pushBlob).not.toHaveBeenCalled();
+        expect(seen).toEqual([[1, 3], [2, 3], [3, 3]]);
+        expect(result.done).toBe(3);
+    });
+
     it('รายงาน n/total ทีละชิ้นจนครบ', async () => {
         const seen: Array<[number, number]> = [];
         await applyOp([push('a'), push('b'), push('c')], ctx((p, t) => seen.push([p, t])));

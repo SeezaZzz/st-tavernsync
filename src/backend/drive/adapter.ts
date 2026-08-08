@@ -48,7 +48,7 @@ export async function discoverDriveLayout(client: DriveClient, knownFolderId?: s
 
 export class DriveAdapter implements StorageAdapter {
     /** listing ของ blobs/ ต่อ adapter instance (instance ถูกสร้างใหม่ทุก sync ผ่าน requireRuntime)
-     *  — กัน full-folder listing ซ้ำทุก checkBlobs (uploadBlobsParallel เรียกทีละ item) */
+     *  — ใช้ร่วมกันทั้ง batch check และ putBlob retry โดยไม่ list โฟลเดอร์ซ้ำ */
     private blobsListing: Promise<Set<string>> | null = null;
 
     constructor(
@@ -91,7 +91,7 @@ export class DriveAdapter implements StorageAdapter {
         const name = await this.crypto.blobNameFor(hash);
         // dedup จาก listing ที่ cache ไว้ ไม่ใช่ findChildByName ต่อไฟล์ —
         // การถามทีละไฟล์เพิ่ม round-trip หนึ่งครั้งต่อ blob ซึ่งบน Drive คือครึ่งหนึ่งของเวลาอัปโหลด
-        // ปกติ uploadBlobsParallel เรียก checkBlobs() มาก่อน cache จึงอุ่นอยู่แล้ว (0 คำขอเพิ่ม);
+        // ปกติ uploadBlobsParallel เรียก checkBlobs() ทั้ง batch มาก่อน cache จึงอุ่นอยู่แล้ว (0 คำขอเพิ่ม);
         // ถ้าถูกเรียกเดี่ยว ๆ listBlobNames() จะ list ครั้งเดียวแล้ว cache ไว้ ยังกันซ้ำได้เหมือนเดิม
         const have = await this.listBlobNames();
         if (have.has(name)) return;

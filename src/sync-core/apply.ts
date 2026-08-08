@@ -1,10 +1,22 @@
 import type { ApplyOp } from './types';
 import { sortPullOps } from './plan';
+import { mapPool } from '../util/pool';
+
+const PULL_CONCURRENCY = 4;
+
+export interface PushBlobItem {
+    readonly id: string;
+    readonly hash: string;
+}
 
 export interface ApplyContext {
     dryRun: boolean;
     log: (msg: string, meta?: unknown) => void;
     pushBlob: (id: string, hash: string) => Promise<void>;
+    pushBlobs?: (
+        items: readonly PushBlobItem[],
+        onProcessed: (item: PushBlobItem) => void,
+    ) => Promise<void>;
     pullAndApply: (id: string, type: ApplyOp['type'], hash: string) => Promise<void>;
     keepBoth: (id: string, type: ApplyOp['type']) => Promise<void>;
     tombstone: (id: string) => Promise<void>;
@@ -67,14 +79,46 @@ export async function applyOp(ops: ApplyOp[], ctx: ApplyContext): Promise<{ done
     // นับรวมทุก op (รวม skip) เพื่อให้ตัวเลขบน UI เดินถึง total เสมอ
     const total = ops.length;
     let processed = 0;
+    const reportProgress = () => ctx.onProgress?.(++processed, total);
     const step = async (op: ApplyOp) => {
         await run(op);
-        ctx.onProgress?.(++processed, total);
+        reportProgress();
     };
 
     // Push first (upload), then pulls in dependency order, then other
-    for (const op of pushOps) await step(op);
-    for (const op of pullOps) await step(op);
+    const canBatchPush = !!ctx.pushBlobs && !ctx.dryRun && pushOps.every((op) => !op.dryRun);
+    if (canBatchPush && ctx.pushBlobs) {
+        const items = pushOps.map((op) => {
+            if (!op.hash) throw new TypeError(`push_blob ${op.id} has no hash`);
+            return { id: op.id, hash: op.hash };
+        });
+        const completed = new Set<string>();
+        try {
+            await ctx.pushBlobs(items, (item) => {
+                completed.add(item.id);
+                done++;
+                ctx.log('push_blob', item);
+                reportProgress();
+            });
+        } catch (error) {
+            for (const op of pushOps) {
+                if (!completed.has(op.id)) failed.push(op.id);
+            }
+            ctx.log('failed', { ops: pushOps, error: String(error) });
+            throw error;
+        }
+    } else {
+        for (const op of pushOps) await step(op);
+    }
+    // Pulls within one item type are independent, but type groups have ordering
+    // constraints (for example settings must finish before personas).
+    for (let start = 0; start < pullOps.length;) {
+        const type = pullOps[start].type;
+        let end = start + 1;
+        while (end < pullOps.length && pullOps[end].type === type) end++;
+        await mapPool(pullOps.slice(start, end), PULL_CONCURRENCY, step);
+        start = end;
+    }
     for (const op of other) await step(op);
 
     return { done, skipped, failed };

@@ -3,7 +3,6 @@
  */
 
 import { ConflictError, manifestVersionForPush, type StorageRevision } from '../backend/adapter';
-import { uploadBlobsParallel } from '../backend/http';
 import { requireRuntime, type BackendRuntime } from '../backend/runtime';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
@@ -20,6 +19,7 @@ import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
 import { emptyManifest } from '../sync-core/types';
 import { LEGACY_BASE_KEY, baseStorageKey, e2eeKeyStorageKey, getSyncStore } from '../state/store';
+import { createPushHandlers } from './push-batch';
 
 export interface BaseState {
     manifest: Manifest;
@@ -657,14 +657,11 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         dryRun: !!opts.dryRun,
         log: (msg, meta) => console.log(LOG_PREFIX, msg, meta ?? ''),
         onProgress: (processed, total) => progressUi(`${opVerb} ${processed}/${total}…`),
-        pushBlob: async (id, hash) => {
-            let data = await loadBlob(hash);
-            if (!data || data.byteLength === 0) {
-                throw new Error(`Missing local blob for ${id} (${hash})`);
-            }
-            data = await rt.crypto.encryptBlob(data);
-            await uploadBlobsParallel(adapter, [{ hash, data }]);
-        },
+        ...createPushHandlers({
+            adapter,
+            load: loadBlob,
+            encrypt: (data) => rt.crypto.encryptBlob(data),
+        }),
         pullAndApply: async (id, type, hash) => {
             let boxed: Uint8Array;
             try {

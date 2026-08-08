@@ -1,6 +1,7 @@
 import { ConflictError, type RemoteSnapshot, type StorageAdapter, type StorageRevision } from './adapter';
 import type { Manifest } from '../sync-core/types';
 import { LOG_PREFIX } from '../settings';
+import { mapPool } from '../util/pool';
 
 export interface HttpAdapterOptions {
     endpoint: string;
@@ -148,34 +149,42 @@ export class HttpStorageAdapter implements StorageAdapter {
     }
 }
 
-/** Upload missing blobs with concurrency cap 4 + simple backoff. */
+export interface UploadBlobsOptions {
+    readonly hashes: readonly string[];
+    readonly load: (hash: string) => Promise<Uint8Array>;
+    readonly concurrency?: number;
+    /** Called once per unique hash, including hashes already present remotely. */
+    readonly onProcessed?: (hash: string) => void;
+}
+
+/** Upload missing blobs lazily with bounded concurrency and simple backoff. */
 export async function uploadBlobsParallel(
     adapter: StorageAdapter,
-    entries: { hash: string; data: Uint8Array }[],
-    concurrency = 4,
+    options: UploadBlobsOptions,
 ): Promise<void> {
-    const missing = await adapter.checkBlobs(entries.map((e) => e.hash));
-    const need = new Set(missing);
-    const queue = entries.filter((e) => need.has(e.hash));
+    if (options.hashes.length === 0) return;
 
-    let i = 0;
-    async function worker() {
-        while (i < queue.length) {
-            const idx = i++;
-            const entry = queue[idx];
-            let attempt = 0;
-            for (;;) {
-                try {
-                    await adapter.putBlob(entry.hash, entry.data);
-                    break;
-                } catch (e) {
-                    attempt++;
-                    if (attempt >= 3) throw e;
-                    await new Promise((r) => setTimeout(r, 250 * 2 ** attempt));
-                }
-            }
-        }
+    const unique = [...new Set(options.hashes)];
+    const missing = new Set(await adapter.checkBlobs(unique));
+    const queue = unique.filter((hash) => missing.has(hash));
+
+    for (const hash of unique) {
+        if (!missing.has(hash)) options.onProcessed?.(hash);
     }
 
-    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length || 1) }, () => worker()));
+    await mapPool(queue, options.concurrency ?? 4, async (hash) => {
+        const data = await options.load(hash);
+        let attempt = 0;
+        for (;;) {
+            try {
+                await adapter.putBlob(hash, data);
+                options.onProcessed?.(hash);
+                return;
+            } catch (error) {
+                attempt++;
+                if (attempt >= 3) throw error;
+                await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+            }
+        }
+    });
 }
