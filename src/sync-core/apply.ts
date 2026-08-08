@@ -9,6 +9,8 @@ export interface PushBlobItem {
     readonly hash: string;
 }
 
+export type PreparedPull = () => Promise<void>;
+
 export interface ApplyContext {
     dryRun: boolean;
     log: (msg: string, meta?: unknown) => void;
@@ -17,6 +19,8 @@ export interface ApplyContext {
         items: readonly PushBlobItem[],
         onProcessed: (item: PushBlobItem) => void,
     ) => Promise<void>;
+    /** Prepare network/crypto work in parallel; returned ST writer is applied serially. */
+    preparePull?: (id: string, type: ApplyOp['type'], hash: string) => Promise<PreparedPull>;
     pullAndApply: (id: string, type: ApplyOp['type'], hash: string) => Promise<void>;
     keepBoth: (id: string, type: ApplyOp['type']) => Promise<void>;
     tombstone: (id: string) => Promise<void>;
@@ -84,6 +88,26 @@ export async function applyOp(ops: ApplyOp[], ctx: ApplyContext): Promise<{ done
         await run(op);
         reportProgress();
     };
+    const prepare = async (op: ApplyOp): Promise<PreparedPull> => {
+        try {
+            return await ctx.preparePull!(op.id, op.type, op.hash!);
+        } catch (error) {
+            failed.push(op.id);
+            ctx.log('failed', { op, error: String(error) });
+            throw error;
+        }
+    };
+    const applyPrepared = async (op: ApplyOp, prepared: PreparedPull) => {
+        try {
+            await prepared();
+            done++;
+            reportProgress();
+        } catch (error) {
+            failed.push(op.id);
+            ctx.log('failed', { op, error: String(error) });
+            throw error;
+        }
+    };
 
     // Push first (upload), then pulls in dependency order, then other
     const canBatchPush = !!ctx.pushBlobs && !ctx.dryRun && pushOps.every((op) => !op.dryRun);
@@ -110,13 +134,39 @@ export async function applyOp(ops: ApplyOp[], ctx: ApplyContext): Promise<{ done
     } else {
         for (const op of pushOps) await step(op);
     }
-    // Pulls within one item type are independent, but type groups have ordering
-    // constraints (for example settings must finish before personas).
+    // Type groups retain ordering constraints (for example settings before personas).
+    // Production Pull prepares only network/crypto work four-wide, then applies each
+    // result serially so ST never parses/imports multiple large payloads at once.
     for (let start = 0; start < pullOps.length;) {
         const type = pullOps[start].type;
         let end = start + 1;
         while (end < pullOps.length && pullOps[end].type === type) end++;
-        await mapPool(pullOps.slice(start, end), PULL_CONCURRENCY, step);
+        const group = pullOps.slice(start, end);
+        if (ctx.preparePull && !ctx.dryRun) {
+            let batch: ApplyOp[] = [];
+            const flush = async () => {
+                if (batch.length === 0) return;
+                const current = batch;
+                batch = [];
+                const prepared = await mapPool(current, PULL_CONCURRENCY, prepare);
+                for (let index = 0; index < current.length; index++) {
+                    await applyPrepared(current[index], prepared[index]);
+                }
+            };
+
+            for (const op of group) {
+                if (op.kind === 'pull_blob' && !op.dryRun) {
+                    batch.push(op);
+                    if (batch.length === PULL_CONCURRENCY) await flush();
+                } else {
+                    await flush();
+                    await step(op);
+                }
+            }
+            await flush();
+        } else {
+            for (const op of group) await step(op);
+        }
         start = end;
     }
     for (const op of other) await step(op);

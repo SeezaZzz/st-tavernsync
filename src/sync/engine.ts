@@ -13,7 +13,7 @@ import { stFetchJson } from '../st-adapter/http';
 import { conflictSiblingId, tryChatFastForward } from '../sync-core/conflict';
 import { diffManifests, summarizeDiff } from '../sync-core/diff';
 import { mergeManifestItems } from '../sync-core/merge';
-import { applyOp } from '../sync-core/apply';
+import { applyOp, type PreparedPull } from '../sync-core/apply';
 import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
@@ -653,43 +653,37 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
     const pullAppliedIds = new Set<string>();
     let pullSkipped = 0;
 
-    await applyOp(plan, {
-        dryRun: !!opts.dryRun,
-        log: (msg, meta) => console.log(LOG_PREFIX, msg, meta ?? ''),
-        onProgress: (processed, total) => progressUi(`${opVerb} ${processed}/${total}…`),
-        ...createPushHandlers({
-            adapter,
-            load: loadBlob,
-            encrypt: (data) => rt.crypto.encryptBlob(data),
-        }),
-        pullAndApply: async (id, type, hash) => {
-            let boxed: Uint8Array;
-            try {
-                boxed = await getRemoteBlob(rt, hash);
-            } catch (e) {
-                if (isBlobMissingError(e)) {
-                    pullSkipped++;
-                    console.error(LOG_PREFIX, `Skipping pull ${id}: blob ${hash} not on server`, e);
-                    toastr.warning(
-                        `Skipped ${id} — missing on the server. Push from the device that still has it.`,
-                        'TavernSync',
-                    );
-                    return;
-                }
-                throw e;
-            }
-            let plain: Uint8Array;
-            try {
-                plain = await rt.crypto.decryptBlob(boxed, hash);
-            } catch (e) {
+    const preparePull = async (id: string, type: SyncItem['type'], hash: string): Promise<PreparedPull> => {
+        let boxed: Uint8Array;
+        try {
+            boxed = await getRemoteBlob(rt, hash);
+        } catch (e) {
+            if (isBlobMissingError(e)) {
                 pullSkipped++;
-                console.error(LOG_PREFIX, `Skipping pull ${id}: decrypt/hash failed`, e);
+                console.error(LOG_PREFIX, `Skipping pull ${id}: blob ${hash} not on server`, e);
                 toastr.warning(
-                    `Skipped ${id} — could not read server copy (wrong key or corrupt).`,
+                    `Skipped ${id} — missing on the server. Push from the device that still has it.`,
                     'TavernSync',
                 );
-                return;
+                return async () => undefined;
             }
+            throw e;
+        }
+
+        let plain: Uint8Array;
+        try {
+            plain = await rt.crypto.decryptBlob(boxed, hash);
+        } catch (e) {
+            pullSkipped++;
+            console.error(LOG_PREFIX, `Skipping pull ${id}: decrypt/hash failed`, e);
+            toastr.warning(
+                `Skipped ${id} — could not read server copy (wrong key or corrupt).`,
+                'TavernSync',
+            );
+            return async () => undefined;
+        }
+
+        return async () => {
             await storeBlob(hash, plain);
             if (type === 'settings') {
                 settingsChanged = true;
@@ -703,7 +697,20 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 await applyLocalItem(id, type, plain, !!opts.dryRun);
             }
             pullAppliedIds.add(id);
-        },
+        };
+    };
+
+    await applyOp(plan, {
+        dryRun: !!opts.dryRun,
+        log: (msg, meta) => console.log(LOG_PREFIX, msg, meta ?? ''),
+        onProgress: (processed, total) => progressUi(`${opVerb} ${processed}/${total}…`),
+        ...createPushHandlers({
+            adapter,
+            load: loadBlob,
+            encrypt: (data) => rt.crypto.encryptBlob(data),
+        }),
+        preparePull,
+        pullAndApply: async (id, type, hash) => (await preparePull(id, type, hash))(),
         keepBoth: async (id, type) => {
             const entry = entries.find((x) => x.id === id);
             if (!entry?.remote) return;
