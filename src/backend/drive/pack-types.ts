@@ -29,6 +29,8 @@ export interface DrivePackManifestV2 {
     updatedAt: number;
     chunkBytes: number;
     packBytes: number;
+    baseCommitId?: string;
+    forced?: boolean;
     items: Record<string, DrivePackItemV2>;
 }
 
