@@ -22,6 +22,7 @@ export class DriveUploadPausedError extends Error {
 
 export interface PackUploadControl {
     signal?: AbortSignal;
+    resume?: { sessionUrl: string; acknowledgedBytes: number };
     onUploadedBytes?(uploaded: number, total: number): void;
     onRetry?(attempt: number, delayMs: number): void;
 }
@@ -33,7 +34,6 @@ export interface UploadPackOptions extends PackUploadControl {
     rangeBytes?: number;
     sleep?(ms: number): Promise<void>;
     random?(): number;
-    resume?: { sessionUrl: string; acknowledgedBytes: number };
 }
 
 function isTransient(error: unknown): boolean {

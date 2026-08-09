@@ -4,7 +4,12 @@
 
 import { ConflictError, manifestVersionForPush, type StorageRevision } from '../backend/adapter';
 import { requireDriveV2Runtime, requireRuntime, type BackendRuntime } from '../backend/runtime';
-import { runDriveV2FullPush } from '../backend/drive/drive-v2-push';
+import {
+    createDriveV2PushController,
+    driveV2ControllerResult,
+    type DriveV2PushController,
+    type DriveV2PushResult,
+} from '../backend/drive/drive-v2-push';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
@@ -38,6 +43,7 @@ let sessionPassphrase: string | null = null;
 let generatingSince = 0;
 /** storageNamespace ของ runtime ล่าสุด — ใช้ต่อ remembered key storage */
 let currentNamespace = '';
+let activeDriveV2Controller: DriveV2PushController | null = null;
 
 export function getSessionKey(): CryptoKey | null {
     return sessionKey;
@@ -492,7 +498,7 @@ export async function runDriveV2FullPushFromEngine(options: {
     const runtime = await requireDriveV2Runtime();
     currentNamespace = `drive:${runtime.layout.rootId}`;
     const items = Object.values(scanned.manifest.items).filter(item => !item.deleted);
-    const result = await runDriveV2FullPush({
+    const controller = createDriveV2PushController({
         runtime,
         device: settings.deviceName || 'device',
         items,
@@ -500,10 +506,25 @@ export async function runDriveV2FullPushFromEngine(options: {
         scanMs,
         onProgress: options.onProgress,
     });
+    activeDriveV2Controller = controller;
+    const result = await controller.run();
+    return finishDriveV2Push(result);
+}
+
+function finishDriveV2Push(result: DriveV2PushResult): { message: string } {
+    const settings = getSettings();
     settings.lastItemCount = result.metrics.itemCount;
     settings.lastStatusMessage = `Full Push complete · ${Math.round(result.metrics.elapsedMs / 1000)}s`;
     saveSettings();
     return { message: settings.lastStatusMessage };
+}
+
+export async function resumeDriveV2FullPushFromEngine(): Promise<{ message: string }> {
+    if (!activeDriveV2Controller) throw new Error('No paused Drive v2 Push to resume');
+    await activeDriveV2Controller.resume();
+    const result = driveV2ControllerResult(activeDriveV2Controller);
+    if (!result) throw new Error('Drive v2 Push resumed without a result');
+    return finishDriveV2Push(result);
 }
 
 export async function runSync(opts: SyncRunOptions): Promise<{ message: string }> {

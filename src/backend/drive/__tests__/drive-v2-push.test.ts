@@ -3,10 +3,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { SyncItem } from '../../../sync-core/types';
 import { runSync } from '../../../sync/engine';
 import {
+    createDriveV2PushController,
     runDriveV2FullPush,
     type DriveV2PushOptions,
     type DriveV2Runtime,
 } from '../drive-v2-push';
+import { DriveAuthError } from '../client';
+import { DriveUploadPausedError } from '../pack-uploader';
 import type { DrivePackCrypto } from '../pack-crypto';
 import type { DrivePackManifestV2, EncryptedPack } from '../pack-types';
 
@@ -105,7 +108,82 @@ describe('Drive v2 Full Push', () => {
         expect(harness.commits).toBe(0);
     });
 
+    it('does not commit when cancelled after pack verification', async () => {
+        const abort = new AbortController();
+        let commits = 0;
+        const runtime: DriveV2Runtime = {
+            layout: { rootId: 'root', packsId: 'packs', manifestsId: 'manifests' },
+            crypto: cryptoStub(),
+            store: {
+                async hasCommittedSnapshot() { return false; },
+                async putPack() { return undefined; },
+                async verifyPacks() { abort.abort(); },
+                async commitManifest() { commits += 1; return { commitId: 'bad-commit' }; },
+            },
+        };
+        await expect(runDriveV2FullPush({
+            runtime,
+            device: 'pc',
+            items: [{ id: 'one', type: 'character', hash: 'one', size: 1, mtime: 1 }],
+            chunkBytes: 1,
+            packBytes: 1,
+            concurrency: 1,
+            load: async () => new Uint8Array([1]),
+            signal: abort.signal,
+        })).rejects.toMatchObject({ name: 'AbortError' });
+        expect(commits).toBe(0);
+    });
+
     it.each(['pull', 'both'] as const)('blocks unsupported v2 direction %s', async direction => {
         await expect(runSync({ direction })).rejects.toThrow('Drive v2 Phase 1 supports Full Push only');
+    });
+
+    it('resumes an auth-paused pack with the same ciphertext and session', async () => {
+        const source = new Uint8Array([7]);
+        let pausedPack: EncryptedPack | null = null;
+        let resumedPack: EncryptedPack | null = null;
+        let pausedBytes: Uint8Array | null = null;
+        let resumedBytes: Uint8Array | null = null;
+        let resumeState: unknown = null;
+        let completed = false;
+        const store = {
+            async hasCommittedSnapshot() { return false; },
+            async putPack(pack: EncryptedPack, control?: { resume?: unknown }) {
+                if (!pausedPack) {
+                    pausedPack = pack;
+                    pausedBytes = pack.bytes;
+                    throw new DriveUploadPausedError('session-1', 1, new DriveAuthError());
+                }
+                if (!completed) {
+                    resumedPack = pack;
+                    resumedBytes = pack.bytes;
+                    resumeState = control?.resume;
+                    completed = true;
+                }
+            },
+            async verifyPacks() { return undefined; },
+            async commitManifest() { return { commitId: 'commit-id' }; },
+        };
+        const controller = createDriveV2PushController({
+            runtime: {
+                layout: { rootId: 'root', packsId: 'packs', manifestsId: 'manifests' },
+                crypto: cryptoStub(),
+                store,
+            },
+            device: 'pc',
+            items: [{ id: 'one', type: 'character', hash: 'hash-one', size: 1, mtime: 1 }],
+            chunkBytes: 1,
+            packBytes: 1,
+            concurrency: 1,
+            load: async () => source,
+        });
+
+        await expect(controller.run()).rejects.toMatchObject({ name: 'DriveUploadPausedError' });
+        await controller.resume();
+
+        expect(resumedPack).not.toBeNull();
+        expect(pausedPack).not.toBeNull();
+        expect(resumedBytes).toBe(pausedBytes);
+        expect(resumeState).toEqual({ sessionUrl: 'session-1', acknowledgedBytes: 1 });
     });
 });
