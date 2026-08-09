@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { loadBase, saveBase, clearBase, type BaseState } from '../engine';
-import { LEGACY_BASE_KEY, baseStorageKey } from '../../state/store';
+import {
+    LEGACY_BASE_KEY,
+    baseStorageKey,
+    clearBackendState,
+    e2eeKeyStorageKey,
+} from '../../state/store';
 import { emptyManifest } from '../../sync-core/types';
 
 /** localforage ปลอม — เก็บใน Map ให้ตรวจคีย์ที่ถูกเขียนจริงได้ */
@@ -87,5 +92,21 @@ describe('legacy base migration', () => {
         await clearBase();
         expect(items.has(baseStorageKey('drive:FOLDER_A'))).toBe(false);
         expect(items.has(LEGACY_BASE_KEY)).toBe(false);
+    });
+});
+
+describe('backend state cleanup', () => {
+    it('removes only the selected base and remembered key namespace', async () => {
+        items.set(baseStorageKey('drive:FOLDER_A'), baseFor('a'));
+        items.set(e2eeKeyStorageKey('drive:FOLDER_A'), 'key-a');
+        items.set(baseStorageKey('drive:FOLDER_B'), baseFor('b'));
+        items.set(e2eeKeyStorageKey('drive:FOLDER_B'), 'key-b');
+
+        await clearBackendState('drive:FOLDER_A');
+
+        expect(items.has(baseStorageKey('drive:FOLDER_A'))).toBe(false);
+        expect(items.has(e2eeKeyStorageKey('drive:FOLDER_A'))).toBe(false);
+        expect(items.has(baseStorageKey('drive:FOLDER_B'))).toBe(true);
+        expect(items.has(e2eeKeyStorageKey('drive:FOLDER_B'))).toBe(true);
     });
 });

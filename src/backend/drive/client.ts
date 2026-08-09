@@ -2,7 +2,6 @@
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const MULTIPART_LIMIT = 5 * 1024 * 1024;
-const ROOT_FOLDER_QUERY = "appProperties has { key='ts' and value='root-v1' } and trashed=false";
 
 export class DriveAuthError extends Error {
     constructor() { super('Google authorization expired or revoked'); this.name = 'DriveAuthError'; }
@@ -74,8 +73,8 @@ export class DriveClient {
         return (data.files ?? [])[0] ?? null;
     }
 
-    async searchRootFolders(): Promise<DriveFileMeta[]> {
-        const q = encodeURIComponent(ROOT_FOLDER_QUERY);
+    async searchRootFolders(marker: 'root-v1' | 'root-v2' = 'root-v1'): Promise<DriveFileMeta[]> {
+        const q = encodeURIComponent(`appProperties has { key='ts' and value='${marker}' } and trashed=false`);
         const fields = encodeURIComponent('files(id,name,size,createdTime,appProperties)');
         const data = await (await this.req(`${API}/files?q=${q}&fields=${fields}&pageSize=100`)).json();
         return data.files ?? [];

@@ -41,3 +41,12 @@ export function baseStorageKey(namespace: string): string {
 export function e2eeKeyStorageKey(namespace: string): string {
     return `tavernsync_e2ee_key_b64:${namespace}`;
 }
+
+/** Remove only state bound to one backend namespace. Bulk scan blobs are backend-independent. */
+export async function clearBackendState(namespace: string): Promise<void> {
+    const syncStore = getSyncStore();
+    await Promise.all([
+        syncStore.removeItem(baseStorageKey(namespace)),
+        syncStore.removeItem(e2eeKeyStorageKey(namespace)),
+    ]);
+}

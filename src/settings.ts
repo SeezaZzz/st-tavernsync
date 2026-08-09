@@ -43,6 +43,8 @@ export interface TavernSyncSettings {
     driveClientId: string;
     /** Drive root folder id — remembers the root selected/created per device */
     driveFolderId: string;
+    /** Drive storage schema for the remembered Root. Existing installs backfill to v1. */
+    driveRootVersion: 1 | 2;
     lastStatusMessage: string;
     lastItemCount: number;
 }
@@ -71,6 +73,7 @@ export const defaultSettings: Readonly<TavernSyncSettings> = Object.freeze({
     e2eeSalt: '',
     driveClientId: '',
     driveFolderId: '',
+    driveRootVersion: 1,
     lastStatusMessage: 'Not set up yet',
     lastItemCount: 0,
 });
@@ -130,6 +133,7 @@ export function getSettings(): TavernSyncSettings {
     if (typeof settings.e2eeSalt !== 'string') settings.e2eeSalt = '';
     if (typeof settings.driveClientId !== 'string') settings.driveClientId = '';
     if (typeof settings.driveFolderId !== 'string') settings.driveFolderId = '';
+    if (settings.driveRootVersion !== 1 && settings.driveRootVersion !== 2) settings.driveRootVersion = 1;
     if (typeof settings.lastItemCount !== 'number') settings.lastItemCount = 0;
 
     settings.autoSyncOnStartup = !!settings.autoSyncOnStartup;

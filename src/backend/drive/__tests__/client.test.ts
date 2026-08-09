@@ -114,6 +114,17 @@ describe('DriveClient', () => {
         expect(seen[0]).toContain('pageSize=100');
     });
 
+    it('searchRootFolders accepts an exact v2 marker', async () => {
+        let seen = '';
+        stubFetch(async url => {
+            seen = decodeURIComponent(String(url));
+            return new Response(JSON.stringify({ files: [] }), { status: 200 });
+        });
+        await new DriveClient(tp).searchRootFolders('root-v2');
+        expect(seen).toContain("appProperties has { key='ts' and value='root-v2' }");
+        expect(seen).not.toContain("value='root-v1'");
+    });
+
     it('handles 308 and parses the acknowledged byte range', async () => {
         stubFetch(async () => new Response('', {
             status: 308,
