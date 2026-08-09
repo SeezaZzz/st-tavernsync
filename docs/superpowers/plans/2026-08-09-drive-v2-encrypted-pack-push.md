@@ -269,7 +269,10 @@ git commit -m "feat(drive): add encrypted pack v2 primitives"
 **Interfaces:**
 - Consumes: `DrivePackCrypto`, `DrivePackManifestV2`, `SyncItem`.
 - Produces: `buildDrivePacks(options): Promise<DrivePackManifestV2>`.
-- Transfers ownership of each emitted `EncryptedPack.bytes` to `emit()` and never retains it after `emit()` resolves.
+- Transfers ownership of each emitted `EncryptedPack.bytes` to `emit()`. The
+  promise resolves when the bounded upload queue has accepted ownership, not
+  when the network upload finishes; the queue may apply backpressure while all
+  four upload slots are occupied.
 
 Define the following test-local fixtures in `pack-builder.test.ts`: `item(id,
 size)` returns a complete `SyncItem`; `fixtures` maps its hash to bytes;
@@ -782,7 +785,13 @@ if (s.backendMode === 'drive' && s.driveRootVersion === 2) {
 }
 ```
 
-Use a bounded four-slot upload queue whose `emit(pack)` promise resolves only after that pack finishes, providing backpressure to `buildDrivePacks()`. Refuse a second committed snapshot with `Drive v2 incremental Push is not implemented`; allow a retry when packs exist but no `commit-v2` manifest exists.
+Use a bounded four-slot upload queue whose `emit(pack)` promise resolves once
+the queue accepts ownership of the bytes. The queue holds at most four
+in-flight packs, applies backpressure before accepting a fifth, and exposes a
+`drain()` promise that must resolve before verification or manifest commit.
+Refuse a second committed snapshot with `Drive v2 incremental Push is not
+implemented`; allow a retry when packs exist but no `commit-v2` manifest
+exists.
 
 - [ ] **Step 4: Run v2, legacy Push, HTTP runtime, and full tests**
 
