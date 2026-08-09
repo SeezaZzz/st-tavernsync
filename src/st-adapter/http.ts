@@ -48,6 +48,23 @@ export async function stFetchBytes(url: string): Promise<Uint8Array> {
     return new Uint8Array(await res.arrayBuffer());
 }
 
+export async function stFetchDelete(
+    url: string,
+    body: unknown,
+    missingStatuses: readonly number[] = [404],
+): Promise<void> {
+    const ctx = getCtx();
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: ctx.getRequestHeaders(),
+        body: JSON.stringify(body),
+    });
+    if (res.ok || missingStatuses.includes(res.status)) return;
+    const text = await res.text().catch(() => '');
+    console.error(LOG_PREFIX, `ST API ${url} → ${res.status}`, text);
+    throw new Error(`ST API ${url} failed: ${res.status}`);
+}
+
 export async function stFetchForm<T = unknown>(url: string, form: FormData): Promise<T> {
     const ctx = getCtx();
     const headers = ctx.getRequestHeaders({ omitContentType: true });

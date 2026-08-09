@@ -3,6 +3,7 @@
  * Speaks SyncItem above this boundary.
  */
 export * from './http';
+export * from './delete';
 export * from './normalize';
 export * from './read';
 export * from './scan';
