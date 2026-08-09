@@ -38,13 +38,15 @@ async function saveChatCache(cache: ChatMetaCache): Promise<void> {
 
 export async function storeBlob(hash: string, bytes: Uint8Array): Promise<void> {
     if (bytes.byteLength === 0) return;
-    await getSyncStore().setItem(BLOB_PREFIX + hash, Array.from(bytes));
+    await getSyncStore().setItem(BLOB_PREFIX + hash, bytes);
 }
 
 export async function loadBlob(hash: string): Promise<Uint8Array | null> {
-    const arr = await getSyncStore().getItem<number[]>(BLOB_PREFIX + hash);
-    if (!arr) return null;
-    return new Uint8Array(arr);
+    const value = await getSyncStore().getItem<Uint8Array | ArrayBuffer | number[]>(BLOB_PREFIX + hash);
+    if (!value) return null;
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    return new Uint8Array(value);
 }
 
 export async function saveLocalManifest(manifest: Manifest): Promise<void> {
