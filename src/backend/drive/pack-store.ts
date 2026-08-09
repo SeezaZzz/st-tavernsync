@@ -4,6 +4,11 @@ import type { DrivePackCrypto } from './pack-crypto';
 import type { DrivePackLayout } from './pack-layout';
 import { uploadPackResumable, type PackUploadControl } from './pack-uploader';
 import type { DrivePackManifestV2, EncryptedPack } from './pack-types';
+import {
+    parentProperties,
+    parseDriveV2Commit,
+    type DriveV2CommitMeta,
+} from './drive-v2-head';
 
 export class DrivePackStore {
     private listing: Promise<Map<string, DriveFileMeta>> | null = null;
@@ -30,6 +35,22 @@ export class DrivePackStore {
     async hasCommittedSnapshot(): Promise<boolean> {
         const manifests = await this.client.listChildren(this.layout.manifestsId);
         return manifests.some(file => file.appProperties?.ts === 'commit-v2');
+    }
+
+    async listCommits(): Promise<DriveV2CommitMeta[]> {
+        return (await this.client.listChildren(this.layout.manifestsId))
+            .filter(file => file.appProperties?.ts === 'commit-v2')
+            .map(parseDriveV2Commit);
+    }
+
+    async readManifest(commit: DriveV2CommitMeta): Promise<DrivePackManifestV2> {
+        return this.crypto.decryptManifest(await this.client.getFileData(commit.fileId));
+    }
+
+    async readPack(name: string): Promise<Uint8Array> {
+        const file = (await this.listPacks()).get(name);
+        if (!file) throw new Error(`missing pack: ${name}`);
+        return this.client.getFileData(file.id);
     }
 
     async putPack(pack: EncryptedPack, options: PackUploadControl = {}): Promise<void> {
@@ -69,7 +90,10 @@ export class DrivePackStore {
         this.verifiedPacks = verified;
     }
 
-    async commitManifest(manifest: DrivePackManifestV2): Promise<{ commitId: string }> {
+    async commitManifest(
+        manifest: DrivePackManifestV2,
+        parents: readonly string[] = [],
+    ): Promise<{ commitId: string }> {
         if (!this.verifiedPacks) throw new Error('packs must be verified before manifest commit');
         for (const item of Object.values(manifest.items)) {
             for (const chunk of item.chunks) {
@@ -85,7 +109,7 @@ export class DrivePackStore {
             this.layout.manifestsId,
             `${commitId}.enc`,
             bytes,
-            { ts: 'commit-v2' },
+            { ts: 'commit-v2', ...parentProperties(parents) },
         );
         return { commitId };
     }

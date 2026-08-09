@@ -5,6 +5,7 @@ import { DrivePackStore } from '../pack-store';
 import {
     DRIVE_V2_CHUNK_BYTES,
     DRIVE_V2_PACK_BYTES,
+    emptyDrivePackManifest,
     type DrivePackManifestV2,
     type EncryptedPack,
 } from '../pack-types';
@@ -50,19 +51,21 @@ function cryptoStub(): DrivePackCrypto {
         async decryptChunk(value) { return value; },
         async packName() { return 'unused'; },
         async encryptManifest() { return new Uint8Array([0xca, 0xfe, 0xba, 0xbe]); },
-        async decryptManifest() { throw new Error('not used'); },
+        async decryptManifest() { return manifestFixture('character/from-drive.png'); },
     };
 }
 
 function makeStore(options: {
     existing?: DriveFileMeta[];
     manifests?: DriveFileMeta[];
+    fileBytes?: Record<string, Uint8Array>;
     uploadedMetadataOmitsSize?: boolean;
 } = {}) {
     const files = new Map((options.existing ?? []).map(file => [file.name, file]));
     const sessions = new Map<string, { name: string; totalBytes: number }>();
     const events: string[] = [];
     const commitBytes: Uint8Array[] = [];
+    const committedProperties: Record<string, string>[] = [];
     const client = {
         beginCalls: 0,
         async listChildren(parentId: string): Promise<DriveFileMeta[]> {
@@ -93,13 +96,18 @@ function makeStore(options: {
         async queryResumableFile(): Promise<ResumableRangeResult> {
             throw new Error('not used');
         },
+        async getFileData(fileId: string): Promise<Uint8Array> {
+            const bytes = options.fileBytes?.[fileId];
+            if (!bytes) throw new Error(`missing fixture bytes: ${fileId}`);
+            return bytes;
+        },
         async createFile(
             _parentId: string,
             name: string,
             bytes: Uint8Array,
             properties?: Record<string, string>,
         ): Promise<DriveFileMeta> {
-            expect(properties).toEqual({ ts: 'commit-v2' });
+            committedProperties.push(properties ?? {});
             events.push('commit');
             commitBytes.push(bytes);
             return { id: `commit:${name}`, name, size: String(bytes.byteLength) };
@@ -110,10 +118,42 @@ function makeStore(options: {
         cryptoStub(),
         { rootId: 'root-id', packsId: 'packs-id', manifestsId: 'manifests-id' },
     );
-    return { store, client, events, commitBytes };
+    return { store, client, events, commitBytes, committedProperties };
 }
 
 describe('Drive pack store', () => {
+    it('lists v2 commits and decrypts the selected manifest', async () => {
+        const { store } = makeStore({
+            manifests: [{
+                id: 'm1',
+                name: 'abc.enc',
+                createdTime: '2026-08-09T00:00:00Z',
+                appProperties: { ts: 'commit-v2' },
+            }],
+            fileBytes: { m1: new Uint8Array([7]) },
+        });
+        const [head] = await store.listCommits();
+        expect(head.commitId).toBe('abc');
+        await expect(store.readManifest(head)).resolves.toMatchObject({ schema: 2 });
+    });
+
+    it('reads a pack by deterministic name and rejects an absent pack', async () => {
+        const { store } = makeStore({
+            existing: [{ id: 'p1', name: 'pack-a', size: '4' }],
+            fileBytes: { p1: new Uint8Array(4) },
+        });
+        await expect(store.readPack('pack-a')).resolves.toHaveLength(4);
+        await expect(store.readPack('missing')).rejects.toThrow('missing pack');
+    });
+
+    it('publishes only parent hashes in appProperties', async () => {
+        const { store, committedProperties } = makeStore();
+        await store.verifyPacks([]);
+        await store.commitManifest(emptyDrivePackManifest('pc'), ['head-a', 'head-b']);
+        expect(committedProperties[0]).toEqual({ ts: 'commit-v2', parents: 'head-a,head-b' });
+        expect(JSON.stringify(committedProperties[0])).not.toContain('private');
+    });
+
     it('detects an existing committed v2 snapshot', async () => {
         const { store } = makeStore({
             manifests: [{ id: 'm1', name: 'commit.enc', appProperties: { ts: 'commit-v2' } }],
@@ -148,12 +188,13 @@ describe('Drive pack store', () => {
     });
 
     it('commits schema 2 ciphertext after expected packs verify', async () => {
-        const { store, events, commitBytes } = makeStore();
+        const { store, events, commitBytes, committedProperties } = makeStore();
         const packs = packFixtures();
         for (const pack of packs) await store.putPack(pack);
         await store.verifyPacks(packs.map(pack => ({ name: pack.name, byteLength: pack.bytes.byteLength })));
         await store.commitManifest(manifestFixture('character/private.png'));
         expect(events.at(-1)).toBe('commit');
         expect(new TextDecoder().decode(commitBytes[0])).not.toContain('private.png');
+        expect(committedProperties[0]).toEqual({ ts: 'commit-v2' });
     });
 });
