@@ -446,7 +446,11 @@ export class DriveHttpError extends Error {
 }
 
 export class DriveUploadPausedError extends Error {
-    constructor(readonly acknowledgedBytes: number, readonly cause: DriveAuthError) {
+    constructor(
+        readonly sessionUrl: string,
+        readonly acknowledgedBytes: number,
+        readonly cause: DriveAuthError,
+    ) {
         super('Google authentication required to resume upload');
         this.name = 'DriveUploadPausedError';
     }
@@ -461,6 +465,7 @@ export interface UploadPackOptions {
     rangeBytes?: number;
     sleep?(ms: number): Promise<void>;
     random?(): number;
+    resume?: { sessionUrl: string; acknowledgedBytes: number };
     signal?: AbortSignal;
     onUploadedBytes?(uploaded: number, total: number): void;
 }
@@ -472,7 +477,7 @@ export interface PackUploadControl {
 }
 ```
 
-Retry connection failures, 408, 429, and 5xx with delays `min(1000 * 2 ** attempt + random() * 1000, 32000)`. After an ambiguous failure, call `queryResumableFile()` before sending another range. Throw `DriveAuthError` for 401 and `DriveHttpError` for all other terminal statuses.
+Retry connection failures, 408, 429, and 5xx with delays `min(1000 * 2 ** attempt + random() * 1000, 32000)`. After an ambiguous failure, call `queryResumableFile()` before sending another range. A 401 pause preserves the session URL and acknowledged offset so `Connect & Resume` can pass them back through `resume`; other terminal statuses throw `DriveHttpError`.
 
 - [ ] **Step 5: Run selected tests, full client tests, and typecheck**
 
