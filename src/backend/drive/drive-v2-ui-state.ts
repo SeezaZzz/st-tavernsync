@@ -6,6 +6,25 @@ export interface DriveV2UploadProgressEvent {
     etaSeconds: number;
 }
 
+export type DriveV2PullProgressEvent =
+    | {
+        stage: 'download';
+        completedPacks: number;
+        totalPacks: number;
+        bytesPerSecond: number;
+        etaSeconds: number;
+    }
+    | {
+        stage: 'apply';
+        completedItems: number;
+        totalItems: number;
+        itemType: string;
+    }
+    | {
+        stage: 'delete';
+        totalItems: number;
+    };
+
 export type DriveV2ProgressEvent = DriveV2UploadProgressEvent;
 
 export function canResetDriveV2(typed: string | null, expected: string): boolean {
@@ -22,4 +41,17 @@ function formatEta(seconds: number): string {
 export function formatDriveV2PushProgress(event: DriveV2ProgressEvent): string {
     const mbps = event.bytesPerSecond / (1024 * 1024);
     return `Uploading ${event.completedPacks}/${event.totalPacks} · ${mbps.toFixed(1)} MB/s · ETA ${formatEta(event.etaSeconds)}`;
+}
+
+export function formatDriveV2PullProgress(event: DriveV2PullProgressEvent): string {
+    switch (event.stage) {
+        case 'download': {
+            const mbps = event.bytesPerSecond / (1024 * 1024);
+            return `Downloading packs ${event.completedPacks}/${event.totalPacks} · ${mbps.toFixed(1)} MB/s · ETA ${formatEta(event.etaSeconds)}`;
+        }
+        case 'apply':
+            return `Applying ${event.completedItems}/${event.totalItems} · ${event.itemType}`;
+        case 'delete':
+            return `Deleting ${event.totalItems} items`;
+    }
 }
