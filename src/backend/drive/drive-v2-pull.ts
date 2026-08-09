@@ -102,16 +102,52 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
 
     const applyConcurrency = Math.max(1, Math.floor(options.applyConcurrency ?? 4));
     const maxPreparedBytes = Math.max(1, Math.floor(options.maxPreparedBytes ?? 16 * 1024 * 1024));
-    await options.journal.start(options.commit.commitId);
-    let applied = 0;
-    for (const batch of pullBatches(changed as DrivePackItemV2[], applyConcurrency, maxPreparedBytes)) {
+    const batches = pullBatches(changed as DrivePackItemV2[], applyConcurrency, maxPreparedBytes);
+    const batchBytes = (batch: readonly DrivePackItemV2[]): number =>
+        batch.reduce((total, item) => total + Math.max(1, item.size), 0);
+    const prepareBatch = async (
+        batch: readonly DrivePackItemV2[],
+        startIndex: number,
+    ): Promise<Array<{ item: DrivePackItemV2; bytes: Uint8Array }>> => {
         const prepared: Array<{ item: DrivePackItemV2; bytes: Uint8Array }> = [];
         for (const item of batch) {
             assertNotAborted(options.signal);
-            options.onProgress?.(`Preparing ${applied + prepared.length + 1}/${changed.length} · ${item.type}`);
+            options.onProgress?.(`Preparing ${startIndex + prepared.length + 1}/${changed.length} · ${item.type}`);
             options.checkpoint?.(item, 'downloading');
             prepared.push({ item, bytes: await options.reader.readItem(item) });
         }
+        return prepared;
+    };
+    type PreparedResult =
+        | { ok: true; value: Array<{ item: DrivePackItemV2; bytes: Uint8Array }> }
+        | { ok: false; error: unknown };
+    const prepareSafely = (
+        batch: readonly DrivePackItemV2[],
+        startIndex: number,
+    ): Promise<PreparedResult> => prepareBatch(batch, startIndex).then(
+        value => ({ ok: true, value }),
+        error => ({ ok: false, error }),
+    );
+
+    await options.journal.start(options.commit.commitId);
+    let applied = 0;
+    let preparedThrough = batches[0]?.length ?? 0;
+    let preparedResult = batches.length
+        ? prepareSafely(batches[0], 0)
+        : null;
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const currentResult = await preparedResult!;
+        if (!currentResult.ok) throw currentResult.error;
+        const prepared = currentResult.value;
+        const nextBatch = batches[batchIndex + 1];
+        const canPrefetch = nextBatch
+            && batchBytes(batches[batchIndex]) <= maxPreparedBytes
+            && batchBytes(nextBatch) <= maxPreparedBytes;
+        const nextStartIndex = preparedThrough;
+        let nextResult = canPrefetch
+            ? prepareSafely(nextBatch, nextStartIndex)
+            : null;
+        if (nextBatch) preparedThrough += nextBatch.length;
 
         const outcomes = await Promise.allSettled(prepared.map(async ({ item, bytes }) => {
             options.checkpoint?.(item, 'storing');
@@ -131,6 +167,10 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
             options.onProgress?.(`Applying ${applied}/${changed.length} · ${outcome.value.type}`);
         }
         if (failure !== undefined) throw failure;
+        if (nextBatch && !nextResult) {
+            nextResult = prepareSafely(nextBatch, nextStartIndex);
+        }
+        preparedResult = nextResult;
     }
 
     let deleted = 0;

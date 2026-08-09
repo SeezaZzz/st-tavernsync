@@ -140,6 +140,29 @@ describe('Drive v2 Pull', () => {
         expect(h.maxConcurrentApplies).toBe(1);
     });
 
+    it('prepares the next bounded batch while the current batch is applying', async () => {
+        const h = pullHarness({ remote: ['character/a.png', 'character/b.png'] });
+        h.options.applyConcurrency = 1;
+        let releaseFirst!: () => void;
+        const firstBlocked = new Promise<void>(resolve => { releaseFirst = resolve; });
+        let firstStarted!: () => void;
+        const firstApplying = new Promise<void>(resolve => { firstStarted = resolve; });
+        h.options.applyItem = async id => {
+            h.events.push(`apply:${id}`);
+            if (id === 'character/a.png') {
+                firstStarted();
+                await firstBlocked;
+            }
+        };
+
+        const pulling = runDriveV2Pull(h.options);
+        await firstApplying;
+
+        expect(h.events).toContain('read:character/b.png');
+        releaseFirst();
+        await pulling;
+    });
+
     it('does not delete or advance base after decrypt or apply failure', async () => {
         const h = pullHarness({ failItem: 'character/a.png', localOnly: ['chat/a.png/old'] });
         await expect(runDriveV2Pull(h.options)).rejects.toThrow('character/a.png');
