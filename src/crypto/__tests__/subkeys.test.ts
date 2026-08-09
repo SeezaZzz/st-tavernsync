@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { driveSaltFromFolderIdAsync, deriveDriveSubkeys, hmacNameFor } from '../subkeys';
+import { driveSaltFromFolderIdAsync, deriveDrivePackSubkeys, deriveDriveSubkeys, hmacNameFor } from '../subkeys';
 import { deriveKey, exportKeyRaw, seal, open } from '../index';
 
 const FOLDER = 'folder_abc123';
@@ -31,5 +31,13 @@ describe('drive subkeys', () => {
         const name = await hmacNameFor(s.blobName, 'deadbeef'.repeat(8));
         expect(name).toMatch(/^[0-9a-f]{64}$/);
         expect(name).not.toBe('deadbeef'.repeat(8));
+    });
+
+    it('แยก v2 pack-name key ออกจาก v1 blob-name key', async () => {
+        const root = new Uint8Array(32).fill(9);
+        const v1 = await deriveDriveSubkeys(root, FOLDER);
+        const v2 = await deriveDrivePackSubkeys(root, FOLDER);
+        expect(await hmacNameFor(v2.packName, 'same-input'))
+            .not.toBe(await hmacNameFor(v1.blobName, 'same-input'));
     });
 });

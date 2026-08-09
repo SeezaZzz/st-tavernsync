@@ -14,6 +14,12 @@ export interface DriveSubkeys {
     blobName: CryptoKey;
 }
 
+export interface DrivePackSubkeys {
+    chunkEnc: CryptoKey;
+    packName: CryptoKey;
+    manifestEnc: CryptoKey;
+}
+
 async function hkdf(rootRaw: Uint8Array, folderId: string, info: string, keyType: 'aes' | 'hmac'): Promise<CryptoKey> {
     const base = await crypto.subtle.importKey('raw', rootRaw as BufferSource, 'HKDF', false, ['deriveKey']);
     const salt = encoder.encode(`TavernSync/hkdf-salt/v1:${folderId}`);
@@ -32,6 +38,14 @@ export function deriveDriveSubkeys(rootKeyRaw: Uint8Array, folderId: string): Pr
         hkdf(rootKeyRaw, folderId, 'blob-enc', 'aes'),
         hkdf(rootKeyRaw, folderId, 'blob-name', 'hmac'),
     ]).then(([manifestEnc, blobEnc, blobName]) => ({ manifestEnc, blobEnc, blobName }));
+}
+
+export function deriveDrivePackSubkeys(rootKeyRaw: Uint8Array, folderId: string): Promise<DrivePackSubkeys> {
+    return Promise.all([
+        hkdf(rootKeyRaw, folderId, 'chunk-enc-v2', 'aes'),
+        hkdf(rootKeyRaw, folderId, 'pack-name-v2', 'hmac'),
+        hkdf(rootKeyRaw, folderId, 'manifest-enc-v2', 'aes'),
+    ]).then(([chunkEnc, packName, manifestEnc]) => ({ chunkEnc, packName, manifestEnc }));
 }
 
 export async function hmacNameFor(blobNameKey: CryptoKey, contentHash: string): Promise<string> {
