@@ -15,6 +15,7 @@ import {
     recoverExistingDrivePackLayout,
     resetDriveRootToV2,
 } from './backend/drive/pack-layout';
+import { prepareDriveRootKeyTransition } from './backend/drive/root-key-transition';
 import { canResetDriveV2, driveV2Visibility } from './backend/drive/drive-v2-ui-state';
 import { collectGarbage } from './backend/drive/gc';
 import { encodeSalt } from './crypto';
@@ -363,10 +364,18 @@ async function handleDriveConnect(): Promise<void> {
                 }
             }
             console.debug(LOG_PREFIX, `drive connect: layout ready (root=${layout.rootId.slice(0, 8)}…)`);
+            const rootChanged = await prepareDriveRootKeyTransition(
+                s.driveFolderId,
+                layout.rootId,
+                () => lockE2ee({ forgetDevice: true }),
+            );
             s.driveFolderId = layout.rootId;
             // salt ของบัญชี derive จาก folderId (deterministic ทุกเครื่อง) — unlockE2ee ใช้ค่านี้ต่อได้เลย
             s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(layout.rootId));
             saveSettings();
+            if (rootChanged) {
+                console.info(LOG_PREFIX, 'Drive Root changed; invalidated the previous Root E2EE key');
+            }
             const q = await client.getQuota();
             const files = await client.listChildren('packsId' in layout ? layout.packsId : layout.blobsId);
             $('#tavernsync_quota_line').text(
@@ -381,6 +390,7 @@ async function handleDriveConnect(): Promise<void> {
         );
         updateDriveStatus();
         updateBackendFieldsVisibility();
+        updateE2eeUi();
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Connect failed: ${String(e)}`, 'TavernSync');
