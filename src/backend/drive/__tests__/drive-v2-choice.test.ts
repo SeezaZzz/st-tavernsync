@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ItemType, Manifest, SyncItem } from '../../../sync-core/types';
-import { buildDriveV2SnapshotPreview } from '../drive-v2-choice';
+import {
+    buildDriveV2DevicePreview,
+    buildDriveV2SnapshotPreview,
+} from '../drive-v2-choice';
 import {
     DRIVE_V2_CHUNK_BYTES,
     DRIVE_V2_PACK_BYTES,
@@ -65,5 +68,24 @@ describe('Drive v2 source-choice preview', () => {
             new Set(['character']),
         );
         expect(preview.delete).toBe(0);
+    });
+
+    it('previews the inverse changes when this device becomes latest', () => {
+        const local = manifest({
+            same: item('same', 'h1'),
+            changed: item('changed', 'local'),
+            localOnly: item('localOnly', 'x'),
+        });
+        const remote = packManifest({
+            same: packItem('same', 'h1'),
+            changed: packItem('changed', 'remote'),
+            remoteOnly: packItem('remoteOnly', 'r'),
+        });
+        expect(buildDriveV2DevicePreview(local, remote, allTypes)).toEqual({
+            add: 1,
+            replace: 1,
+            delete: 1,
+            inSync: 1,
+        });
     });
 });

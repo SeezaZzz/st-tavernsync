@@ -17,7 +17,10 @@ export interface DriveV2PushStore {
     hasCommittedSnapshot(): Promise<boolean>;
     putPack(pack: EncryptedPack, options?: PackUploadControl): Promise<void>;
     verifyPacks(expected: readonly { name: string; byteLength: number }[]): Promise<void>;
-    commitManifest(manifest: DrivePackManifestV2): Promise<{ commitId: string }>;
+    commitManifest(
+        manifest: DrivePackManifestV2,
+        parents?: readonly string[],
+    ): Promise<{ commitId: string }>;
 }
 
 export interface DriveV2Runtime {
@@ -52,6 +55,9 @@ export interface DriveV2PushOptions {
     device: string;
     items: readonly SyncItem[];
     load(hash: string): Promise<Uint8Array | null>;
+    parents?: readonly string[];
+    baseCommitId?: string;
+    forced?: boolean;
     chunkBytes?: number;
     packBytes?: number;
     concurrency?: number;
@@ -190,10 +196,6 @@ class BoundedPackUploadQueue {
 }
 
 export async function runDriveV2FullPush(options: DriveV2PushOptions): Promise<DriveV2PushResult> {
-    if (await options.runtime.store.hasCommittedSnapshot()) {
-        throw new Error('Drive v2 incremental Push is not implemented');
-    }
-
     const now = options.now ?? (() => performance.now());
     const startedAt = now();
     const queue = new BoundedPackUploadQueue(
@@ -217,6 +219,8 @@ export async function runDriveV2FullPush(options: DriveV2PushOptions): Promise<D
         emit: pack => queue.accept(pack),
         onProgress: (done, total) => options.onProgress?.(`Packing ${done}/${total}`),
     });
+    if (options.baseCommitId !== undefined) manifest.baseCommitId = options.baseCommitId;
+    if (options.forced !== undefined) manifest.forced = options.forced;
     const packingFinishedAt = now();
     queue.markTotalKnown();
     await queue.drain();
@@ -229,7 +233,7 @@ export async function runDriveV2FullPush(options: DriveV2PushOptions): Promise<D
 
     options.onProgress?.('Committing encrypted manifest…');
     const commitStartedAt = now();
-    const { commitId } = await options.runtime.store.commitManifest(manifest);
+    const { commitId } = await options.runtime.store.commitManifest(manifest, options.parents ?? []);
     const finishedAt = now();
 
     return {

@@ -29,6 +29,8 @@ function pushHarness(config: { packCount: number; concurrency: number; failPack?
     let maxConcurrentUploads = 0;
     let uploads = 0;
     let commits = 0;
+    let committedParents: string[] = [];
+    let committedManifest: DrivePackManifestV2 | null = null;
     const fixtures = new Map<string, Uint8Array>();
     const items: SyncItem[] = [];
     for (let index = 0; index < config.packCount; index++) {
@@ -49,8 +51,10 @@ function pushHarness(config: { packCount: number; concurrency: number; failPack?
             if (uploadNumber === config.failPack) throw new Error(`pack ${uploadNumber}`);
         },
         async verifyPacks() { events.push('verify'); },
-        async commitManifest(_manifest: DrivePackManifestV2) {
+        async commitManifest(manifest: DrivePackManifestV2, parents: readonly string[] = []) {
             commits += 1;
+            committedManifest = manifest;
+            committedParents = [...parents];
             events.push('commit');
             return { commitId: 'commit-id' };
         },
@@ -74,6 +78,8 @@ function pushHarness(config: { packCount: number; concurrency: number; failPack?
         events,
         get maxConcurrentUploads() { return maxConcurrentUploads; },
         get commits() { return commits; },
+        get committedParents() { return committedParents; },
+        get committedManifest() { return committedManifest; },
     };
 }
 
@@ -106,6 +112,18 @@ describe('Drive v2 Full Push', () => {
         const harness = pushHarness({ packCount: 9, concurrency: 4, failPack: 3 });
         await expect(runDriveV2FullPush(harness.options)).rejects.toThrow('pack 3');
         expect(harness.commits).toBe(0);
+    });
+
+    it('publishes parent and prior-base metadata only in the encrypted manifest', async () => {
+        const harness = pushHarness({ packCount: 1, concurrency: 1 });
+        harness.options.parents = ['head-a', 'head-b'];
+        harness.options.baseCommitId = 'old-base';
+        harness.options.forced = true;
+
+        await runDriveV2FullPush(harness.options);
+
+        expect(harness.committedParents).toEqual(['head-a', 'head-b']);
+        expect(harness.committedManifest).toMatchObject({ baseCommitId: 'old-base', forced: true });
     });
 
     it('does not commit when cancelled after pack verification', async () => {

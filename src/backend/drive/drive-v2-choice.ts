@@ -8,16 +8,23 @@ export interface DriveV2SnapshotPreview {
     inSync: number;
 }
 
-export interface DriveV2SnapshotSummary extends DriveV2SnapshotPreview {
-    commitId?: string;
+export interface DriveV2LocalSummary {
     device: string;
-    createdTime?: string;
     itemCount: number;
 }
 
+export interface DriveV2HeadChoice {
+    commitId: string;
+    device: string;
+    createdTime: string;
+    itemCount: number;
+    useDrive: DriveV2SnapshotPreview;
+    useLocal: DriveV2SnapshotPreview;
+}
+
 export interface DriveV2ChoiceInput {
-    local: DriveV2SnapshotSummary;
-    heads: DriveV2SnapshotSummary[];
+    local: DriveV2LocalSummary;
+    heads: DriveV2HeadChoice[];
 }
 
 export function buildDriveV2SnapshotPreview(
@@ -37,6 +44,30 @@ export function buildDriveV2SnapshotPreview(
 
     for (const localItem of Object.values(local.items)) {
         if (allowedTypes.has(localItem.type) && !remote.items[localItem.id]) {
+            preview.delete += 1;
+        }
+    }
+
+    return preview;
+}
+
+export function buildDriveV2DevicePreview(
+    local: Manifest,
+    remote: DrivePackManifestV2,
+    allowedTypes: ReadonlySet<ItemType>,
+): DriveV2SnapshotPreview {
+    const preview: DriveV2SnapshotPreview = { add: 0, replace: 0, delete: 0, inSync: 0 };
+
+    for (const localItem of Object.values(local.items)) {
+        if (!allowedTypes.has(localItem.type)) continue;
+        const remoteItem = remote.items[localItem.id];
+        if (!remoteItem) preview.add += 1;
+        else if (remoteItem.hash === localItem.hash) preview.inSync += 1;
+        else preview.replace += 1;
+    }
+
+    for (const remoteItem of Object.values(remote.items)) {
+        if (allowedTypes.has(remoteItem.type) && !local.items[remoteItem.id]) {
             preview.delete += 1;
         }
     }
