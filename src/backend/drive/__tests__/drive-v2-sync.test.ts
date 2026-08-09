@@ -107,15 +107,31 @@ describe('Drive v2 guarded sync', () => {
         expect(h.savedBases.at(-1)?.commitId).toBe('new-head');
     });
 
-    it('pulls the selected head when a stale device chooses a Drive snapshot', async () => {
+    it('pulls the only Drive head without offering the local device as a source', async () => {
         const h = syncHarness({
             base: 'head-a',
             heads: ['head-b'],
-            choice: { kind: 'drive', commitId: 'head-b' },
+            direction: 'pull',
+            choice: { kind: 'local' },
         });
         await runDriveV2Sync(h.options);
+        expect(h.choiceCalls).toBe(0);
         expect(h.events).toContain('pull:head-b');
         expect(h.events.some(event => event.startsWith('push:'))).toBe(false);
+    });
+
+    it('pulls the newest Drive head when Drive contains concurrent heads', async () => {
+        const h = syncHarness({
+            base: 'head-a',
+            heads: ['head-b', 'head-c'],
+            direction: 'pull',
+            choice: { kind: 'local' },
+        });
+
+        await runDriveV2Sync(h.options);
+
+        expect(h.choiceCalls).toBe(0);
+        expect(h.events).toEqual(['pull:head-c']);
     });
 
     it('force-pushes this device and closes every current head', async () => {

@@ -61,6 +61,14 @@ export async function runDriveV2Sync(options: DriveV2SyncOptions): Promise<Drive
         return pushAndSave(options, [], base?.commitId, false);
     }
 
+    if (options.direction === 'pull') {
+        const newestHead = [...heads].sort((a, b) =>
+            b.createdTime.localeCompare(a.createdTime)
+            || b.commitId.localeCompare(a.commitId))[0];
+        const manifest = await store.readManifest(newestHead);
+        return { kind: 'pulled', result: await options.runPull(newestHead, manifest) };
+    }
+
     const currentHead = heads.length === 1 && base?.commitId === heads[0].commitId
         ? heads[0]
         : null;

@@ -20,6 +20,7 @@ function pullHarness(input: {
     localOnly?: string[];
     inSync?: string[];
     failItem?: string;
+    sizes?: Record<string, number>;
 }) {
     const remoteIds = [...new Set([
         ...(input.remote ?? []),
@@ -34,7 +35,7 @@ function pullHarness(input: {
         id,
         type: typeOf(id),
         hash: `hash:${id}`,
-        size: 1,
+        size: input.sizes?.[id] ?? 1,
         mtime: 1,
         chunks: [],
     } satisfies DrivePackItemV2]));
@@ -77,7 +78,7 @@ function pullHarness(input: {
             async readItem(item: DrivePackItemV2) {
                 events.push(`read:${item.id}`);
                 if (item.id === input.failItem) throw new Error(item.id);
-                return new Uint8Array([1]);
+                return new Uint8Array(item.size);
             },
             getDownloadedPackCount: () => 0,
             getPeakCachedBytes: () => 0,
@@ -107,29 +108,36 @@ function pullHarness(input: {
 }
 
 describe('Drive v2 Pull', () => {
-    it('applies changed items serially in shared order and runs deletions last', async () => {
+    it('applies same-type items concurrently and runs deletions last', async () => {
         const h = pullHarness({
-            remote: ['settings/root', 'character/a.png'],
+            remote: ['settings/root', 'character/a.png', 'character/b.png'],
             localOnly: ['chat/a.png/old'],
         });
+        h.options.applyConcurrency = 4;
         await runDriveV2Pull(h.options);
-        expect(h.maxConcurrentApplies).toBe(1);
-        expect(h.events).toEqual([
-            'journal-start:head-b',
-            'checkpoint:downloading:character/a.png',
-            'read:character/a.png',
-            'checkpoint:storing:character/a.png',
-            'checkpoint:applying:character/a.png',
-            'apply:character/a.png', 'journal-item:character/a.png',
-            'checkpoint:downloading:settings/root',
-            'read:settings/root',
-            'checkpoint:storing:settings/root',
-            'checkpoint:applying:settings/root',
-            'apply:settings/root', 'journal-item:settings/root',
+        expect(h.maxConcurrentApplies).toBe(2);
+        expect(h.events.indexOf('apply:settings/root'))
+            .toBeGreaterThan(h.events.indexOf('apply:character/b.png'));
+        expect(h.events.indexOf('delete:chat/a.png/old'))
+            .toBeGreaterThan(h.events.indexOf('journal-item:settings/root'));
+        expect(h.events.slice(-3)).toEqual([
             'delete:chat/a.png/old',
             'save-base:head-b',
             'journal-finish:head-b',
         ]);
+    });
+
+    it('serializes prepared items when their combined bytes exceed the memory cap', async () => {
+        const h = pullHarness({
+            remote: ['character/a.png', 'character/b.png'],
+            sizes: { 'character/a.png': 10, 'character/b.png': 10 },
+        });
+        h.options.applyConcurrency = 4;
+        h.options.maxPreparedBytes = 15;
+
+        await runDriveV2Pull(h.options);
+
+        expect(h.maxConcurrentApplies).toBe(1);
     });
 
     it('does not delete or advance base after decrypt or apply failure', async () => {
