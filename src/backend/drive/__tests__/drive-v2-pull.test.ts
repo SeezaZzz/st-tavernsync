@@ -97,6 +97,7 @@ function pullHarness(input: {
             async markCompleted(itemId) { events.push(`journal-item:${itemId}`); },
             async finish(commitId) { events.push(`journal-finish:${commitId}`); },
         },
+        checkpoint(item, stage) { events.push(`checkpoint:${stage}:${item.id}`); },
     };
     return {
         options,
@@ -115,8 +116,16 @@ describe('Drive v2 Pull', () => {
         expect(h.maxConcurrentApplies).toBe(1);
         expect(h.events).toEqual([
             'journal-start:head-b',
-            'read:character/a.png', 'apply:character/a.png', 'journal-item:character/a.png',
-            'read:settings/root', 'apply:settings/root', 'journal-item:settings/root',
+            'checkpoint:downloading:character/a.png',
+            'read:character/a.png',
+            'checkpoint:storing:character/a.png',
+            'checkpoint:applying:character/a.png',
+            'apply:character/a.png', 'journal-item:character/a.png',
+            'checkpoint:downloading:settings/root',
+            'read:settings/root',
+            'checkpoint:storing:settings/root',
+            'checkpoint:applying:settings/root',
+            'apply:settings/root', 'journal-item:settings/root',
             'delete:chat/a.png/old',
             'save-base:head-b',
             'journal-finish:head-b',

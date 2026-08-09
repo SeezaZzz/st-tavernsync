@@ -10,6 +10,8 @@ export interface DriveV2PullJournal {
     finish(commitId: string): Promise<void>;
 }
 
+export type DriveV2PullStage = 'downloading' | 'storing' | 'applying';
+
 export interface DriveV2PullOptions {
     commit: DriveV2CommitMeta;
     manifest: DrivePackManifestV2;
@@ -22,6 +24,7 @@ export interface DriveV2PullOptions {
     saveBlob(hash: string, bytes: Uint8Array): Promise<void>;
     saveBase(commitId: string): Promise<void>;
     journal: DriveV2PullJournal;
+    checkpoint?(item: DrivePackItemV2, stage: DriveV2PullStage): void;
     onProgress?(message: string): void;
     signal?: AbortSignal;
     now?(): number;
@@ -70,8 +73,11 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
     for (const item of changed) {
         assertNotAborted(options.signal);
         options.onProgress?.(`Applying ${applied + 1}/${changed.length} · ${item.type}`);
+        options.checkpoint?.(item, 'downloading');
         const bytes = await options.reader.readItem(item as DrivePackItemV2);
+        options.checkpoint?.(item, 'storing');
         await options.saveBlob(item.hash, bytes);
+        options.checkpoint?.(item, 'applying');
         await options.applyItem(item.id, item.type, bytes);
         await options.journal.markCompleted(item.id);
         applied += 1;

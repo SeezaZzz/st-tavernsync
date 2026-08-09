@@ -8,7 +8,10 @@ import {
     driveV2BaseStorageKey,
     e2eeKeyStorageKey,
     loadDriveV2Base,
+    loadDriveV2PullJournal,
+    markDriveV2PullItemCompleted,
     saveDriveV2Base,
+    startDriveV2PullJournal,
 } from '../../state/store';
 import { emptyManifest } from '../../sync-core/types';
 
@@ -100,6 +103,17 @@ describe('legacy base migration', () => {
 });
 
 describe('backend state cleanup', () => {
+    it('persists selected v2 commit and completed item ids per Drive root', async () => {
+        await startDriveV2PullJournal('drive:root-a', 'head-a');
+        await markDriveV2PullItemCompleted('drive:root-a', 'character/a.png');
+
+        await expect(loadDriveV2PullJournal('drive:root-a')).resolves.toEqual({
+            commitId: 'head-a',
+            completedItemIds: ['character/a.png'],
+        });
+        await expect(loadDriveV2PullJournal('drive:root-b')).resolves.toBeNull();
+    });
+
     it('namespaces the Drive v2 base by Drive root', async () => {
         await saveDriveV2Base('drive:root-a', { commitId: 'a', syncedAt: 1 });
         await saveDriveV2Base('drive:root-b', { commitId: 'b', syncedAt: 2 });

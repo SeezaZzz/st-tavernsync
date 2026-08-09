@@ -63,6 +63,44 @@ export async function clearDriveV2Base(namespace: string): Promise<void> {
     await getSyncStore().removeItem(driveV2BaseStorageKey(namespace));
 }
 
+export interface DriveV2PullJournalState {
+    readonly commitId: string;
+    readonly completedItemIds: readonly string[];
+}
+
+export function driveV2PullJournalStorageKey(namespace: string): string {
+    return `tavernsync_drive_v2_pull:${namespace}`;
+}
+
+export async function loadDriveV2PullJournal(
+    namespace: string,
+): Promise<DriveV2PullJournalState | null> {
+    return getSyncStore().getItem<DriveV2PullJournalState>(driveV2PullJournalStorageKey(namespace));
+}
+
+export async function startDriveV2PullJournal(namespace: string, commitId: string): Promise<void> {
+    await getSyncStore().setItem(driveV2PullJournalStorageKey(namespace), {
+        commitId,
+        completedItemIds: [],
+    } satisfies DriveV2PullJournalState);
+}
+
+export async function markDriveV2PullItemCompleted(namespace: string, itemId: string): Promise<void> {
+    const state = await loadDriveV2PullJournal(namespace);
+    if (!state) return;
+    const completedItemIds = state.completedItemIds.includes(itemId)
+        ? state.completedItemIds
+        : [...state.completedItemIds, itemId];
+    await getSyncStore().setItem(driveV2PullJournalStorageKey(namespace), {
+        ...state,
+        completedItemIds,
+    } satisfies DriveV2PullJournalState);
+}
+
+export async function clearDriveV2PullJournal(namespace: string): Promise<void> {
+    await getSyncStore().removeItem(driveV2PullJournalStorageKey(namespace));
+}
+
 /** Remove only state bound to one backend namespace. Bulk scan blobs are backend-independent. */
 export async function clearBackendState(namespace: string): Promise<void> {
     const syncStore = getSyncStore();
@@ -70,5 +108,6 @@ export async function clearBackendState(namespace: string): Promise<void> {
         syncStore.removeItem(baseStorageKey(namespace)),
         syncStore.removeItem(e2eeKeyStorageKey(namespace)),
         syncStore.removeItem(driveV2BaseStorageKey(namespace)),
+        syncStore.removeItem(driveV2PullJournalStorageKey(namespace)),
     ]);
 }

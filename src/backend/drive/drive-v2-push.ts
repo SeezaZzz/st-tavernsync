@@ -5,6 +5,7 @@ import type { DrivePackLayout } from './pack-layout';
 import type { PackUploadControl } from './pack-uploader';
 import { DriveUploadPausedError } from './pack-uploader';
 import { formatDriveV2PushProgress } from './drive-v2-ui-state';
+import type { DriveV2CommitMeta } from './drive-v2-head';
 import {
     DRIVE_V2_CHUNK_BYTES,
     DRIVE_V2_CONCURRENCY,
@@ -23,10 +24,16 @@ export interface DriveV2PushStore {
     ): Promise<{ commitId: string }>;
 }
 
+export interface DriveV2ReadStore {
+    listCommits(): Promise<DriveV2CommitMeta[]>;
+    readManifest(commit: DriveV2CommitMeta): Promise<DrivePackManifestV2>;
+    readPack(name: string): Promise<Uint8Array>;
+}
+
 export interface DriveV2Runtime {
     layout: DrivePackLayout;
     crypto: DrivePackCrypto;
-    store: DriveV2PushStore;
+    store: DriveV2PushStore & DriveV2ReadStore;
 }
 
 export interface DriveV2PushMetrics {

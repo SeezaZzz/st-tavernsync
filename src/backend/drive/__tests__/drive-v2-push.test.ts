@@ -41,6 +41,9 @@ function pushHarness(config: { packCount: number; concurrency: number; failPack?
 
     const store = {
         async hasCommittedSnapshot() { return false; },
+        async listCommits() { return []; },
+        async readManifest() { throw new Error('not used'); },
+        async readPack() { throw new Error('not used'); },
         async putPack(pack: EncryptedPack) {
             const uploadNumber = uploads++;
             active += 1;
@@ -134,6 +137,9 @@ describe('Drive v2 Full Push', () => {
             crypto: cryptoStub(),
             store: {
                 async hasCommittedSnapshot() { return false; },
+                async listCommits() { return []; },
+                async readManifest() { throw new Error('not used'); },
+                async readPack() { throw new Error('not used'); },
                 async putPack() { return undefined; },
                 async verifyPacks() { abort.abort(); },
                 async commitManifest() { commits += 1; return { commitId: 'bad-commit' }; },
@@ -152,8 +158,9 @@ describe('Drive v2 Full Push', () => {
         expect(commits).toBe(0);
     });
 
-    it.each(['pull', 'both'] as const)('blocks unsupported v2 direction %s', async direction => {
-        await expect(runSync({ direction })).rejects.toThrow('Drive v2 Phase 1 supports Full Push only');
+    it('blocks the ambiguous v2 both direction', async () => {
+        await expect(runSync({ direction: 'both' }))
+            .rejects.toThrow('Drive v2 requires an explicit Push or Pull direction');
     });
 
     it('resumes an auth-paused pack with the same ciphertext and session', async () => {
@@ -166,6 +173,9 @@ describe('Drive v2 Full Push', () => {
         let completed = false;
         const store = {
             async hasCommittedSnapshot() { return false; },
+            async listCommits() { return []; },
+            async readManifest() { throw new Error('not used'); },
+            async readPack() { throw new Error('not used'); },
             async putPack(pack: EncryptedPack, control?: { resume?: unknown }) {
                 if (!pausedPack) {
                     pausedPack = pack;

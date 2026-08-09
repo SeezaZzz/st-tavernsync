@@ -11,7 +11,7 @@ import {
     type DriveLayout,
 } from './backend/drive/adapter';
 import { discoverDrivePackLayout, resetDriveRootToV2 } from './backend/drive/pack-layout';
-import { canResetDriveV2 } from './backend/drive/drive-v2-ui-state';
+import { canResetDriveV2, driveV2Visibility } from './backend/drive/drive-v2-ui-state';
 import { collectGarbage } from './backend/drive/gc';
 import { encodeSalt } from './crypto';
 import { driveSaltFromFolderIdAsync } from './crypto/subkeys';
@@ -28,6 +28,7 @@ import { clearBackendState, getSyncStore } from './state/store';
 import {
     clearBase,
     forgetRememberedE2eeKey,
+    getDriveV2Status,
     getStatusDiff,
     hasE2eeKey,
     lockE2ee,
@@ -43,6 +44,7 @@ import {
 } from './sync/engine';
 import { PullCrashJournal, formatInterruptedPull } from './sync/pull-crash-journal';
 import { promptConflicts } from './ui/conflict';
+import { promptDriveV2SourceChoice } from './ui/drive-v2-source-choice';
 
 function getCtx() {
     return SillyTavern.getContext();
@@ -140,8 +142,14 @@ function updateBackendFieldsVisibility(): void {
     $('#tavernsync_http_fields').toggle(!isDrive);
     $('#tavernsync_gc').toggle(isDrive && !isDriveV2);
     $('#tavernsync_reset_drive_v2').toggle(isDrive);
-    $('#tavernsync_pull, #tavernsync_status_btn').toggle(!isDriveV2);
-    $('#tavernsync_auto_startup, #tavernsync_auto_chat_close').prop('disabled', isDriveV2);
+    const v2Visibility = driveV2Visibility();
+    $('#tavernsync_push').toggle(!isDriveV2 || v2Visibility.push);
+    $('#tavernsync_pull').toggle(!isDriveV2 || v2Visibility.pull);
+    $('#tavernsync_status_btn').toggle(!isDriveV2 || v2Visibility.status);
+    $('#tavernsync_auto_startup, #tavernsync_auto_chat_close').prop(
+        'disabled',
+        isDriveV2 && !v2Visibility.autoSync,
+    );
     const $e2ee = $('#tavernsync_e2ee');
     $e2ee.prop('disabled', isDrive);
     $e2ee.closest('label').attr(
@@ -357,7 +365,7 @@ async function handleDriveConnect(): Promise<void> {
         });
         toastr.success(
             s.driveRootVersion === 2
-                ? 'Connected to Drive v2 — ปลดล็อกแล้วใช้ Full Push ได้เลย (Pull ยังไม่เปิดใน Phase 1)'
+                ? 'Connected to Drive v2 — ปลดล็อกแล้วใช้ Push, Pull หรือ Check status ได้เลย'
                 : 'Connected to Google Drive — ปลดล็อก passphrase แล้ว Push/Pull ได้เลย',
             'TavernSync',
         );
@@ -455,7 +463,34 @@ function bindDrawerQuietScan(): void {
 
 async function handleStatus(): Promise<void> {
     if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
-        toastr.info('Drive v2 Phase 1 รองรับ Full Push เท่านั้น ยังไม่มี Check Status/Pull', 'TavernSync');
+        if (!(await ensureE2eeReady())) return;
+        try {
+            const status = await withLoader('Checking Drive snapshots…', () =>
+                getDriveV2Status((message) => setStatusLine(message)),
+            );
+            const s = getSettings();
+            const stateLabel = status.state === 'current'
+                ? 'Current'
+                : status.state === 'empty'
+                    ? 'Drive empty'
+                    : 'Newer/different snapshot available';
+            const headLabel = `${status.headCount} head${status.headCount === 1 ? '' : 's'}`;
+            const baseLabel = status.baseCommitId ? status.baseCommitId.slice(0, 8) : 'none';
+            s.lastItemCount = status.itemCount;
+            s.lastStatusMessage = `${stateLabel} · ${headLabel} · base ${baseLabel}`;
+            saveSettings();
+            setStatusLine(s.lastStatusMessage);
+            const driveHeads = status.heads.length > 0
+                ? status.heads.map(head => `${head.device} (${head.itemCount} items)`).join(', ')
+                : 'none';
+            toastr.info(
+                `${status.itemCount} local items · Drive snapshots: ${driveHeads}`,
+                'TavernSync status',
+            );
+        } catch (e) {
+            console.error(LOG_PREFIX, e);
+            toastr.error(`Status failed: ${String(e)}`, 'TavernSync');
+        }
         return;
     }
     try {
@@ -488,6 +523,7 @@ async function handlePush(): Promise<void> {
                 direction: 'push',
                 onProgress: (m) => setStatusLine(m),
                 resolveConflicts: (entries, direction) => promptConflicts(entries, direction),
+                chooseDriveV2Source: promptDriveV2SourceChoice,
             }),
         );
         setStatusLine(message);
@@ -506,10 +542,6 @@ async function handlePush(): Promise<void> {
 }
 
 async function handlePull(): Promise<void> {
-    if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
-        toastr.info('Drive v2 Phase 1 ยังไม่เปิด Pull', 'TavernSync');
-        return;
-    }
     if (!(await ensureE2eeReady())) return;
     try {
         const { message } = await withLoader('Pulling…', () =>
@@ -517,6 +549,7 @@ async function handlePull(): Promise<void> {
                 direction: 'pull',
                 onProgress: (m) => setStatusLine(m),
                 resolveConflicts: (entries, direction) => promptConflicts(entries, direction),
+                chooseDriveV2Source: promptDriveV2SourceChoice,
             }),
         );
         setStatusLine(message);
@@ -665,7 +698,7 @@ function bindSettingsHandlers(): void {
     $(document).on('change', '#tavernsync_auto_startup', (e: { target: HTMLInputElement }) => {
         if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
             $(e.target).prop('checked', false);
-            toastr.info('Drive v2 Phase 1 ยังไม่เปิด auto-sync', 'TavernSync');
+            toastr.info('Drive v2 ใช้ Push/Pull แบบเลือก snapshot ด้วยตนเอง จึงไม่เปิด auto-sync', 'TavernSync');
             return;
         }
         getSettings().autoSyncOnStartup = !!$(e.target).prop('checked');
@@ -675,7 +708,7 @@ function bindSettingsHandlers(): void {
     $(document).on('change', '#tavernsync_auto_chat_close', (e: { target: HTMLInputElement }) => {
         if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
             $(e.target).prop('checked', false);
-            toastr.info('Drive v2 Phase 1 ยังไม่เปิด auto-sync', 'TavernSync');
+            toastr.info('Drive v2 ใช้ Push/Pull แบบเลือก snapshot ด้วยตนเอง จึงไม่เปิด auto-sync', 'TavernSync');
             return;
         }
         getSettings().autoSyncOnChatClose = !!$(e.target).prop('checked');

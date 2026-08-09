@@ -10,11 +10,22 @@ import {
     type DriveV2PushController,
     type DriveV2PushResult,
 } from '../backend/drive/drive-v2-push';
+import { DriveV2PackReader } from '../backend/drive/pack-reader';
+import {
+    runDriveV2Pull,
+    type DriveV2PullStage,
+} from '../backend/drive/drive-v2-pull';
+import {
+    runDriveV2Sync,
+    type DriveV2SourceChoice,
+} from '../backend/drive/drive-v2-sync';
+import { computeDriveV2Heads } from '../backend/drive/drive-v2-head';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
 import { loadBlob, loadLocalManifest, scanLocal, storeBlob } from '../st-adapter/scan';
 import { applyLocalItem, decodeUtf8Jsonl, parseItemId, writeChat } from '../st-adapter/write';
+import { deleteLocalItem } from '../st-adapter/delete';
 import { stFetchJson } from '../st-adapter/http';
 import { conflictSiblingId, tryChatFastForward } from '../sync-core/conflict';
 import { diffManifests, summarizeDiff } from '../sync-core/diff';
@@ -24,7 +35,17 @@ import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
 import { emptyManifest } from '../sync-core/types';
-import { LEGACY_BASE_KEY, baseStorageKey, e2eeKeyStorageKey, getSyncStore } from '../state/store';
+import {
+    LEGACY_BASE_KEY,
+    baseStorageKey,
+    clearDriveV2PullJournal,
+    e2eeKeyStorageKey,
+    getSyncStore,
+    loadDriveV2Base,
+    markDriveV2PullItemCompleted,
+    saveDriveV2Base,
+    startDriveV2PullJournal,
+} from '../state/store';
 import { createPushHandlers } from './push-batch';
 import { PullCrashJournal, type PullCrashUpdate, type PullStage } from './pull-crash-journal';
 
@@ -44,6 +65,7 @@ let generatingSince = 0;
 /** storageNamespace ของ runtime ล่าสุด — ใช้ต่อ remembered key storage */
 let currentNamespace = '';
 let activeDriveV2Controller: DriveV2PushController | null = null;
+let activeDriveV2PushNamespace = '';
 
 export function getSessionKey(): CryptoKey | null {
     return sessionKey;
@@ -319,23 +341,23 @@ export function hasE2eeKey(): boolean {
     return !!sessionKey;
 }
 
-function scopeTypeSet(scope: SyncScopeSettings): Set<string> {
-    const map: Record<string, string> = {
-        settings: 'settings',
-        characters: 'character',
-        chats: 'chat',
-        lorebooks: 'worldinfo',
-        presets: 'preset',
-        personas: 'persona',
-        groups: 'group',
-        quickreplies: 'quickreply',
-        themes: 'theme',
-    };
-    const set = new Set<string>();
-    for (const [k, on] of Object.entries(scope)) {
-        if (on && map[k]) {
-            set.add(map[k]);
-            if (k === 'groups') set.add('groupchat');
+function scopeTypeSet(scope: SyncScopeSettings): Set<SyncItem['type']> {
+    const mappings: readonly [keyof SyncScopeSettings, SyncItem['type']][] = [
+        ['settings', 'settings'],
+        ['characters', 'character'],
+        ['chats', 'chat'],
+        ['lorebooks', 'worldinfo'],
+        ['presets', 'preset'],
+        ['personas', 'persona'],
+        ['groups', 'group'],
+        ['quickreplies', 'quickreply'],
+        ['themes', 'theme'],
+    ];
+    const set = new Set<SyncItem['type']>();
+    for (const [setting, type] of mappings) {
+        if (scope[setting]) {
+            set.add(type);
+            if (setting === 'groups') set.add('groupchat');
         }
     }
     return set;
@@ -485,9 +507,20 @@ export interface SyncRunOptions {
     ) => Promise<Map<string, ConflictChoice>>;
     /** @deprecated prefer resolveConflicts */
     resolveConflict?: (entry: DiffEntry) => Promise<ConflictChoice>;
+    chooseDriveV2Source?: (input: import('../backend/drive/drive-v2-choice').DriveV2ChoiceInput) => Promise<DriveV2SourceChoice>;
 }
 
-export async function runDriveV2FullPushFromEngine(options: {
+export class DriveV2SourceChoiceRequiredError extends Error {
+    constructor() {
+        super('Drive v2 source selection is required');
+        this.name = 'DriveV2SourceChoiceRequiredError';
+    }
+}
+
+async function runDriveV2FromEngine(options: {
+    direction: 'push' | 'pull';
+    typeFilter?: ReadonlySet<string>;
+    chooseSource?: SyncRunOptions['chooseDriveV2Source'];
     onProgress?: (message: string) => void;
 }): Promise<{ message: string }> {
     const settings = getSettings();
@@ -497,18 +530,119 @@ export async function runDriveV2FullPushFromEngine(options: {
     const scanMs = performance.now() - scanStartedAt;
     const runtime = await requireDriveV2Runtime();
     currentNamespace = `drive:${runtime.layout.rootId}`;
-    const items = Object.values(scanned.manifest.items).filter(item => !item.deleted);
-    const controller = createDriveV2PushController({
+    const allowedTypes = scopeTypeSet(settings.scope);
+    if (options.typeFilter) {
+        for (const type of [...allowedTypes]) {
+            if (!options.typeFilter.has(type)) allowedTypes.delete(type);
+        }
+    }
+    let pulledItemCount = scanned.itemCount;
+
+    const result = await runDriveV2Sync({
+        direction: options.direction,
         runtime,
-        device: settings.deviceName || 'device',
-        items,
-        load: loadBlob,
-        scanMs,
-        onProgress: options.onProgress,
+        namespace: currentNamespace,
+        local: scanned.manifest,
+        allowedTypes,
+        loadBase: () => loadDriveV2Base(currentNamespace),
+        saveBase: base => saveDriveV2Base(currentNamespace, base),
+        chooseSource: options.chooseSource ?? (() => Promise.reject(new DriveV2SourceChoiceRequiredError())),
+        runPush: async input => {
+            const items = Object.values(scanned.manifest.items)
+                .filter(item => allowedTypes.has(item.type) && !item.deleted);
+            const controller = createDriveV2PushController({
+                runtime,
+                device: settings.deviceName || 'device',
+                items,
+                load: loadBlob,
+                parents: input.parents,
+                baseCommitId: input.baseCommitId,
+                forced: input.forced,
+                scanMs,
+                onProgress: options.onProgress,
+            });
+            activeDriveV2Controller = controller;
+            activeDriveV2PushNamespace = currentNamespace;
+            return controller.run();
+        },
+        runPull: async (commit, manifest) => {
+            pulledItemCount = Object.values(manifest.items)
+                .filter(item => allowedTypes.has(item.type)).length;
+            const reader = new DriveV2PackReader(runtime.store, runtime.crypto, 2);
+            const crashJournal = typeof localStorage === 'undefined'
+                ? null
+                : new PullCrashJournal(localStorage);
+            return runDriveV2Pull({
+                commit,
+                manifest,
+                local: scanned.manifest,
+                localScanComplete: true,
+                allowedTypes,
+                reader,
+                saveBlob: storeBlob,
+                applyItem: async (id, type, bytes) => {
+                    if (type !== 'settings') {
+                        await applyLocalItem(id, type, bytes, false);
+                        return;
+                    }
+                    const pulledValue: unknown = JSON.parse(new TextDecoder().decode(bytes));
+                    const pulled = isPlainObject(pulledValue) ? pulledValue : {};
+                    const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
+                    const liveValue: unknown = JSON.parse(raw.settings || '{}');
+                    const live = isPlainObject(liveValue) ? liveValue : {};
+                    const merged = mergePulledSettings(live, pulled);
+                    await applyLocalItem(
+                        id,
+                        type,
+                        new TextEncoder().encode(JSON.stringify(merged)),
+                        false,
+                    );
+                },
+                deleteItem: deleteLocalItem,
+                saveBase: commitId => saveDriveV2Base(currentNamespace, {
+                    commitId,
+                    syncedAt: Date.now(),
+                }),
+                journal: {
+                    start: async commitId => {
+                        crashJournal?.startRun();
+                        await startDriveV2PullJournal(currentNamespace, commitId);
+                    },
+                    markCompleted: async itemId => {
+                        crashJournal?.finish(itemId);
+                        await markDriveV2PullItemCompleted(currentNamespace, itemId);
+                    },
+                    finish: async () => {
+                        await clearDriveV2PullJournal(currentNamespace);
+                    },
+                },
+                checkpoint: (item, stage: DriveV2PullStage) => {
+                    crashJournal?.update({
+                        id: item.id,
+                        type: item.type,
+                        hash: item.hash,
+                        size: item.size,
+                        stage,
+                    });
+                },
+                onProgress: options.onProgress,
+            });
+        },
     });
-    activeDriveV2Controller = controller;
-    const result = await controller.run();
-    return finishDriveV2Push(result);
+
+    switch (result.kind) {
+        case 'cancelled':
+            return { message: 'Cancelled · no changes' };
+        case 'pushed':
+            return finishDriveV2Push(result.result);
+        case 'pulled': {
+            const seconds = Math.round(result.result.elapsedMs / 1000);
+            settings.lastItemCount = pulledItemCount;
+            settings.lastStatusMessage = `Pull complete · ${seconds}s`;
+            saveSettings();
+            return { message: settings.lastStatusMessage };
+        }
+    }
 }
 
 function finishDriveV2Push(result: DriveV2PushResult): { message: string } {
@@ -524,7 +658,49 @@ export async function resumeDriveV2FullPushFromEngine(): Promise<{ message: stri
     await activeDriveV2Controller.resume();
     const result = driveV2ControllerResult(activeDriveV2Controller);
     if (!result) throw new Error('Drive v2 Push resumed without a result');
+    if (activeDriveV2PushNamespace) {
+        await saveDriveV2Base(activeDriveV2PushNamespace, {
+            commitId: result.commitId,
+            syncedAt: Date.now(),
+        });
+    }
     return finishDriveV2Push(result);
+}
+
+export async function getDriveV2Status(onProgress?: (message: string) => void): Promise<{
+    itemCount: number;
+    headCount: number;
+    baseCommitId: string | null;
+    state: 'empty' | 'current' | 'stale';
+    heads: readonly { commitId: string; device: string; createdTime: string; itemCount: number }[];
+}> {
+    const scanned = await runScan(onProgress);
+    const runtime = await requireDriveV2Runtime();
+    currentNamespace = `drive:${runtime.layout.rootId}`;
+    const commits = await runtime.store.listCommits();
+    const heads = computeDriveV2Heads(commits);
+    const base = await loadDriveV2Base(currentNamespace);
+    const summaries = await Promise.all(heads.map(async commit => {
+        const manifest = await runtime.store.readManifest(commit);
+        return {
+            commitId: commit.commitId,
+            device: manifest.device,
+            createdTime: commit.createdTime,
+            itemCount: Object.keys(manifest.items).length,
+        };
+    }));
+    const state = heads.length === 0
+        ? 'empty' as const
+        : heads.length === 1 && base?.commitId === heads[0].commitId
+            ? 'current' as const
+            : 'stale' as const;
+    return {
+        itemCount: scanned.itemCount,
+        headCount: heads.length,
+        baseCommitId: base?.commitId ?? null,
+        state,
+        heads: summaries,
+    };
 }
 
 export async function runSync(opts: SyncRunOptions): Promise<{ message: string }> {
@@ -533,9 +709,6 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
     }
 
     const s = getSettings();
-    if (s.backendMode === 'drive' && s.driveRootVersion === 2 && opts.direction !== 'push') {
-        throw new Error('Drive v2 Phase 1 supports Full Push only');
-    }
     if (s.e2eeEnabled) {
         await syncAccountSalt();
         if (!sessionKey) {
@@ -543,8 +716,16 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         }
     }
     if (s.backendMode === 'drive' && s.driveRootVersion === 2) {
-        if (opts.dryRun) throw new Error('Drive v2 Phase 1 does not support dry-run Push');
-        return runDriveV2FullPushFromEngine({ onProgress: opts.onProgress });
+        if (opts.dryRun) throw new Error('Drive v2 does not support dry-run sync');
+        if (opts.direction === 'both') {
+            throw new Error('Drive v2 requires an explicit Push or Pull direction');
+        }
+        return runDriveV2FromEngine({
+            direction: opts.direction,
+            typeFilter: opts.typeFilter,
+            chooseSource: opts.chooseDriveV2Source,
+            onProgress: opts.onProgress,
+        });
     }
     const rt = await requireRuntime();
     currentNamespace = rt.storageNamespace;

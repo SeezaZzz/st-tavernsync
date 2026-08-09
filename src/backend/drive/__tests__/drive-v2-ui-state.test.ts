@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     canResetDriveV2,
+    driveV2Visibility,
     formatDriveV2PullProgress,
     formatDriveV2PushProgress,
 } from '../drive-v2-ui-state';
@@ -39,5 +40,14 @@ describe('Drive v2 UI state', () => {
         })).toBe('Applying 724/2347 · chat');
         expect(formatDriveV2PullProgress({ stage: 'delete', totalItems: 3 }))
             .toBe('Deleting 3 items');
+    });
+
+    it('shows manual sync controls but keeps automatic sync disabled', () => {
+        expect(driveV2Visibility()).toEqual({
+            push: true,
+            pull: true,
+            status: true,
+            autoSync: false,
+        });
     });
 });

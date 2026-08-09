@@ -31,6 +31,15 @@ export function canResetDriveV2(typed: string | null, expected: string): boolean
     return typed === expected;
 }
 
+export function driveV2Visibility(): {
+    readonly push: true;
+    readonly pull: true;
+    readonly status: true;
+    readonly autoSync: false;
+} {
+    return { push: true, pull: true, status: true, autoSync: false };
+}
+
 function formatEta(seconds: number): string {
     const safe = Math.max(0, Math.round(seconds));
     const minutes = Math.floor(safe / 60);
