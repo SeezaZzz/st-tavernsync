@@ -1,7 +1,9 @@
 # Drive v2 Node-Side Bulk Logical Restore Design
 
-**Status:** Owner approved direction; written design awaiting owner review  
-**Date:** 2026-08-09  
+**Status:** Owner approved direction; written design awaiting owner review
+
+**Date:** 2026-08-09
+
 **Scope:** Google Drive v2 fast Pull through a TavernSync companion server plugin
 
 ## 1. Decision
