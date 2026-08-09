@@ -42,11 +42,33 @@ export function e2eeKeyStorageKey(namespace: string): string {
     return `tavernsync_e2ee_key_b64:${namespace}`;
 }
 
+export interface DriveV2BaseState {
+    commitId: string;
+    syncedAt: number;
+}
+
+export function driveV2BaseStorageKey(namespace: string): string {
+    return `tavernsync_drive_v2_base:${namespace}`;
+}
+
+export async function loadDriveV2Base(namespace: string): Promise<DriveV2BaseState | null> {
+    return getSyncStore().getItem<DriveV2BaseState>(driveV2BaseStorageKey(namespace));
+}
+
+export async function saveDriveV2Base(namespace: string, base: DriveV2BaseState): Promise<void> {
+    await getSyncStore().setItem(driveV2BaseStorageKey(namespace), base);
+}
+
+export async function clearDriveV2Base(namespace: string): Promise<void> {
+    await getSyncStore().removeItem(driveV2BaseStorageKey(namespace));
+}
+
 /** Remove only state bound to one backend namespace. Bulk scan blobs are backend-independent. */
 export async function clearBackendState(namespace: string): Promise<void> {
     const syncStore = getSyncStore();
     await Promise.all([
         syncStore.removeItem(baseStorageKey(namespace)),
         syncStore.removeItem(e2eeKeyStorageKey(namespace)),
+        syncStore.removeItem(driveV2BaseStorageKey(namespace)),
     ]);
 }

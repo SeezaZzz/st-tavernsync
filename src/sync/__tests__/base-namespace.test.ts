@@ -4,7 +4,11 @@ import {
     LEGACY_BASE_KEY,
     baseStorageKey,
     clearBackendState,
+    clearDriveV2Base,
+    driveV2BaseStorageKey,
     e2eeKeyStorageKey,
+    loadDriveV2Base,
+    saveDriveV2Base,
 } from '../../state/store';
 import { emptyManifest } from '../../sync-core/types';
 
@@ -96,9 +100,20 @@ describe('legacy base migration', () => {
 });
 
 describe('backend state cleanup', () => {
+    it('namespaces the Drive v2 base by Drive root', async () => {
+        await saveDriveV2Base('drive:root-a', { commitId: 'a', syncedAt: 1 });
+        await saveDriveV2Base('drive:root-b', { commitId: 'b', syncedAt: 2 });
+
+        await expect(loadDriveV2Base('drive:root-a')).resolves.toEqual({ commitId: 'a', syncedAt: 1 });
+        await clearDriveV2Base('drive:root-a');
+        await expect(loadDriveV2Base('drive:root-a')).resolves.toBeNull();
+        await expect(loadDriveV2Base('drive:root-b')).resolves.toEqual({ commitId: 'b', syncedAt: 2 });
+    });
+
     it('removes only the selected base and remembered key namespace', async () => {
         items.set(baseStorageKey('drive:FOLDER_A'), baseFor('a'));
         items.set(e2eeKeyStorageKey('drive:FOLDER_A'), 'key-a');
+        items.set(driveV2BaseStorageKey('drive:FOLDER_A'), { commitId: 'v2-a', syncedAt: 1 });
         items.set(baseStorageKey('drive:FOLDER_B'), baseFor('b'));
         items.set(e2eeKeyStorageKey('drive:FOLDER_B'), 'key-b');
 
@@ -106,6 +121,7 @@ describe('backend state cleanup', () => {
 
         expect(items.has(baseStorageKey('drive:FOLDER_A'))).toBe(false);
         expect(items.has(e2eeKeyStorageKey('drive:FOLDER_A'))).toBe(false);
+        expect(items.has(driveV2BaseStorageKey('drive:FOLDER_A'))).toBe(false);
         expect(items.has(baseStorageKey('drive:FOLDER_B'))).toBe(true);
         expect(items.has(e2eeKeyStorageKey('drive:FOLDER_B'))).toBe(true);
     });
