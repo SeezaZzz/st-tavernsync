@@ -148,4 +148,25 @@ describe('DriveClient', () => {
         await new DriveClient(tp).queryResumableFile('https://upload/session', 32);
         expect(headers[0]['Content-Range']).toBe('bytes */32');
     });
+
+    it('downloads only the requested inclusive byte range', async () => {
+        stubFetch(async (_url, init) => {
+            expect((init?.headers as Record<string, string>).Range).toBe('bytes=10-19');
+            return new Response(new Uint8Array(10), {
+                status: 206,
+                headers: { 'Content-Range': 'bytes 10-19/100' },
+            });
+        });
+
+        await expect(new DriveClient(tp).getFileRange('file-1', 10, 10)).resolves.toHaveLength(10);
+    });
+
+    it.each([
+        new Response(new Uint8Array(10), { status: 200 }),
+        new Response(new Uint8Array(9), { status: 206, headers: { 'Content-Range': 'bytes 10-18/100' } }),
+    ])('rejects ignored or truncated range responses', async response => {
+        stubFetch(async () => response);
+
+        await expect(new DriveClient(tp).getFileRange('file-1', 10, 10)).rejects.toThrow(/range/i);
+    });
 });

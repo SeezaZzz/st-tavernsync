@@ -133,7 +133,9 @@ export async function requireRuntime(): Promise<BackendRuntime> {
     };
 }
 
-export async function requireDriveV2Runtime(): Promise<DriveV2Runtime> {
+export async function requireDriveV2Runtime(): Promise<DriveV2Runtime & {
+    store: DriveV2Runtime['store'] & Pick<DrivePackStore, 'listPacks'>;
+}> {
     const s = getSettings();
     if (s.backendMode !== 'drive' || s.driveRootVersion !== 2) {
         throw new Error('Drive v2 runtime requires a Drive v2 Root');

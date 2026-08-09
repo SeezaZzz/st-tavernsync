@@ -182,6 +182,30 @@ export class DriveClient {
         return new Uint8Array(await res.arrayBuffer());
     }
 
+    async getFileRange(id: string, start: number, length: number, signal?: AbortSignal): Promise<Uint8Array> {
+        if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length <= 0) {
+            throw new RangeError('invalid Drive byte range');
+        }
+        const end = start + length - 1;
+        if (!Number.isSafeInteger(end)) throw new RangeError('invalid Drive byte range');
+        const res = await this.authedFetch(`${API}/files/${encodeURIComponent(id)}?alt=media`, {
+            headers: { Range: `bytes=${start}-${end}` },
+            signal,
+        });
+        if (res.status !== 206) {
+            if (!res.ok) throw new DriveHttpError(res.status, await res.text().catch(() => ''));
+            throw new RangeError('Drive ignored the requested byte range');
+        }
+        const contentRange = res.headers.get('Content-Range');
+        const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(contentRange ?? '');
+        if (!match || Number(match[1]) !== start || Number(match[2]) !== end) {
+            throw new RangeError('Drive returned an invalid byte range');
+        }
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        if (bytes.byteLength !== length) throw new RangeError('Drive returned a truncated byte range');
+        return bytes;
+    }
+
     async trashFile(id: string): Promise<void> {
         await this.req(`${API}/files/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trashed: true }) });
     }

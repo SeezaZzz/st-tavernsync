@@ -20,6 +20,13 @@ import {
     type DriveV2SourceChoice,
 } from '../backend/drive/drive-v2-sync';
 import { computeDriveV2Heads } from '../backend/drive/drive-v2-head';
+import { DriveClient } from '../backend/drive/client';
+import { streamRestoreSegments } from '../backend/drive/chunk-stream';
+import { runDriveV2CoreRestore } from '../backend/drive/core-restore';
+import { DriveRangeSource } from '../backend/drive/range-source';
+import { getSharedGisTokenProvider } from '../backend/drive/oauth';
+import { buildRestoreBatches } from '../backend/restore-session/batch-builder';
+import { RestoreSessionClient } from '../backend/restore-session/client';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
@@ -523,6 +530,7 @@ async function runDriveV2FromEngine(options: {
     chooseSource?: SyncRunOptions['chooseDriveV2Source'];
     onProgress?: (message: string) => void;
 }): Promise<{ message: string }> {
+    if (options.direction === 'pull') return runDriveV2FastPullFromEngine(options);
     const settings = getSettings();
     const scanStartedAt = performance.now();
     options.onProgress?.('Scanning local…');
@@ -643,6 +651,94 @@ async function runDriveV2FromEngine(options: {
             return { message: settings.lastStatusMessage };
         }
     }
+}
+
+async function runDriveV2FastPullFromEngine(options: {
+    direction: 'push' | 'pull';
+    typeFilter?: ReadonlySet<string>;
+    chooseSource?: SyncRunOptions['chooseDriveV2Source'];
+    onProgress?: (message: string) => void;
+}): Promise<{ message: string }> {
+    const settings = getSettings();
+    const runtime = await requireDriveV2Runtime();
+    currentNamespace = `drive:${runtime.layout.rootId}`;
+    const allowedTypes = scopeTypeSet(settings.scope);
+    if (options.typeFilter) {
+        for (const type of [...allowedTypes]) {
+            if (!options.typeFilter.has(type)) allowedTypes.delete(type);
+        }
+    }
+    const provider = getSharedGisTokenProvider(settings.driveClientId.trim());
+    let pulledItemCount = 0;
+
+    const result = await runDriveV2Sync({
+        direction: 'pull',
+        runtime,
+        namespace: currentNamespace,
+        local: emptyManifest(settings.deviceName || 'device'),
+        allowedTypes,
+        loadBase: () => loadDriveV2Base(currentNamespace),
+        saveBase: base => saveDriveV2Base(currentNamespace, base),
+        chooseSource: options.chooseSource ?? (() => Promise.reject(new DriveV2SourceChoiceRequiredError())),
+        runPush: async () => { throw new Error('Fast Pull cannot push'); },
+        runPull: async (commit, manifest) => {
+            const items = Object.values(manifest.items)
+                .filter(item => allowedTypes.has(item.type)).length;
+            const selectedItems = Object.values(manifest.items)
+                .filter(item => allowedTypes.has(item.type));
+            pulledItemCount = items;
+            const source = new DriveRangeSource(runtime.store, new DriveClient(provider));
+            const segments = streamRestoreSegments({
+                manifest,
+                source,
+                crypto: runtime.crypto,
+                allowedTypes,
+            });
+            const result = await runDriveV2CoreRestore({
+                client: new RestoreSessionClient(),
+                startRequest: {
+                    requestId: crypto.randomUUID(),
+                    snapshotId: commit.commitId,
+                    scopes: [...allowedTypes],
+                    expectedItems: selectedItems.length,
+                    expectedBytes: selectedItems.reduce((total, item) => total + item.size, 0),
+                    items: selectedItems.map(item => ({
+                        id: item.id,
+                        type: item.type,
+                        size: item.size,
+                        hash: item.hash,
+                        segmentCount: item.chunks.length,
+                    })),
+                },
+                batches: buildRestoreBatches(segments, {
+                    maxBatchBytes: 8_388_608,
+                    maxBatchSegments: 8,
+                }),
+                selectedCommitId: commit.commitId,
+                onProgress: options.onProgress,
+                saveBase: selectedCommitId => saveDriveV2Base(currentNamespace, {
+                    commitId: selectedCommitId,
+                    syncedAt: Date.now(),
+                }),
+            });
+            return {
+                commitId: result.commitId,
+                applied: selectedItems.length,
+                deleted: 0,
+                skippedInSync: 0,
+                downloadedPacks: new Set(selectedItems.flatMap(item => item.chunks.map(chunk => chunk.packName))).size,
+                peakCachedBytes: 0,
+                elapsedMs: result.elapsedMs,
+            };
+        },
+    });
+
+    if (result.kind !== 'pulled') return { message: 'Cancelled · no changes' };
+    const seconds = Math.round(result.result.elapsedMs / 1000);
+    settings.lastItemCount = pulledItemCount;
+    settings.lastStatusMessage = `Fast Pull complete · ${seconds}s`;
+    saveSettings();
+    return { message: settings.lastStatusMessage };
 }
 
 function finishDriveV2Push(result: DriveV2PushResult): { message: string } {
