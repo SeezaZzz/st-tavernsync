@@ -31,6 +31,8 @@ export interface BackendRuntime {
     saltProvider: SaltProvider;
     /** key สำหรับ namespace remembered key ใน localforage เช่น "http:<host>" หรือ "drive:<folderId>" */
     storageNamespace: string;
+    /** Complete pull pipelines allowed in flight. HTTP keeps OG=4; Drive uses 2 on WKWebView. */
+    pullConcurrency: number;
 }
 
 async function sha256Hex(data: Uint8Array): Promise<string> {
@@ -112,6 +114,7 @@ export async function requireRuntime(): Promise<BackendRuntime> {
             crypto,
             saltProvider: new DriveSaltProvider(layout.rootId),
             storageNamespace: `drive:${layout.rootId}`,
+            pullConcurrency: 2,
         };
     }
     if (!s.endpoint.trim()) throw new Error('No endpoint configured');
@@ -122,5 +125,6 @@ export async function requireRuntime(): Promise<BackendRuntime> {
         crypto: makeHttpCrypto(getSessionKey()),
         saltProvider: new HttpSaltProvider(storage),
         storageNamespace: `http:${new URL(s.endpoint.trim()).host}`,
+        pullConcurrency: 4,
     };
 }

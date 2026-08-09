@@ -47,9 +47,9 @@ export async function discoverDriveLayout(client: DriveClient, knownFolderId?: s
 }
 
 export class DriveAdapter implements StorageAdapter {
-    /** listing ของ blobs/ ต่อ adapter instance (instance ถูกสร้างใหม่ทุก sync ผ่าน requireRuntime)
-     *  — ใช้ร่วมกันทั้ง batch check และ putBlob retry โดยไม่ list โฟลเดอร์ซ้ำ */
-    private blobsListing: Promise<Set<string>> | null = null;
+    /** name → file id listing ต่อ adapter instance (สร้างใหม่ทุก sync ผ่าน requireRuntime)
+     *  — ใช้ร่วมกันทั้ง check/get/put โดยไม่ query หรือ list โฟลเดอร์ซ้ำต่อ blob */
+    private blobsListing: Promise<Map<string, string>> | null = null;
 
     constructor(
         private client: DriveClient,
@@ -57,10 +57,10 @@ export class DriveAdapter implements StorageAdapter {
         private layout: DriveLayout,
     ) {}
 
-    private listBlobNames(): Promise<Set<string>> {
+    private listBlobFiles(): Promise<Map<string, string>> {
         if (!this.blobsListing) {
             this.blobsListing = this.client.listChildren(this.layout.blobsId)
-                .then(files => new Set(files.map(f => f.name)))
+                .then(files => new Map(files.map(f => [f.name, f.id])))
                 .catch(err => { this.blobsListing = null; throw err; });
         }
         return this.blobsListing;
@@ -72,7 +72,7 @@ export class DriveAdapter implements StorageAdapter {
     }
 
     async checkBlobs(hashes: string[]): Promise<string[]> {
-        const have = await this.listBlobNames();
+        const have = await this.listBlobFiles();
         const missing: string[] = [];
         for (const h of hashes) {
             if (!have.has(await this.crypto.blobNameFor(h))) missing.push(h);
@@ -82,9 +82,9 @@ export class DriveAdapter implements StorageAdapter {
 
     async getBlob(hash: string): Promise<Uint8Array> {
         const name = await this.crypto.blobNameFor(hash);
-        const f = await this.client.findChildByName(this.layout.blobsId, name);
-        if (!f) throw new Error(`blob not found: ${hash}`);
-        return this.client.getFileData(f.id);
+        const fileId = (await this.listBlobFiles()).get(name);
+        if (!fileId) throw new Error(`blob not found: ${hash}`);
+        return this.client.getFileData(fileId);
     }
 
     async putBlob(hash: string, data: Uint8Array): Promise<void> {
@@ -92,11 +92,11 @@ export class DriveAdapter implements StorageAdapter {
         // dedup จาก listing ที่ cache ไว้ ไม่ใช่ findChildByName ต่อไฟล์ —
         // การถามทีละไฟล์เพิ่ม round-trip หนึ่งครั้งต่อ blob ซึ่งบน Drive คือครึ่งหนึ่งของเวลาอัปโหลด
         // ปกติ uploadBlobsParallel เรียก checkBlobs() ทั้ง batch มาก่อน cache จึงอุ่นอยู่แล้ว (0 คำขอเพิ่ม);
-        // ถ้าถูกเรียกเดี่ยว ๆ listBlobNames() จะ list ครั้งเดียวแล้ว cache ไว้ ยังกันซ้ำได้เหมือนเดิม
-        const have = await this.listBlobNames();
+        // ถ้าถูกเรียกเดี่ยว ๆ listBlobFiles() จะ list ครั้งเดียวแล้ว cache ไว้ ยังกันซ้ำได้เหมือนเดิม
+        const have = await this.listBlobFiles();
         if (have.has(name)) return;
-        await this.client.createFile(this.layout.blobsId, name, data);
-        have.add(name); // อัปเดต cache ให้ตรงกับของที่เพิ่งอัปโหลด
+        const created = await this.client.createFile(this.layout.blobsId, name, data);
+        have.set(name, created.id); // อัปเดต cache ให้ตรงกับของที่เพิ่งอัปโหลด
     }
 
     async quota(): Promise<{ usedBytes: number; limitBytes: number; itemCount: number }> {

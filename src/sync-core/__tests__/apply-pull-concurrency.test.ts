@@ -21,79 +21,27 @@ function context(pullAndApply: (id: string, type: ItemType, hash: string) => Pro
 }
 
 describe('applyOp pull concurrency', () => {
-    it('prepares four pulls concurrently but applies them one at a time', async () => {
-        let activePrepare = 0;
-        let peakPrepare = 0;
-        let activeApply = 0;
-        let peakApply = 0;
-        const preparePull = vi.fn(async () => {
-            activePrepare++;
-            peakPrepare = Math.max(peakPrepare, activePrepare);
+    it('uses the backend pull concurrency for the complete OG pull pipeline', async () => {
+        let active = 0;
+        let peak = 0;
+        const pullAndApply = vi.fn(async () => {
+            active++;
+            peak = Math.max(peak, active);
             await new Promise((resolve) => setTimeout(resolve, 5));
-            activePrepare--;
-            return async () => {
-                activeApply++;
-                peakApply = Math.max(peakApply, activeApply);
-                await new Promise((resolve) => setTimeout(resolve, 5));
-                activeApply--;
-            };
+            active--;
         });
-        const legacyPullAndApply = vi.fn(async () => {
-            throw new Error('legacy pull path must not run');
-        });
-        const ops = Array.from({ length: 8 }, (_, index) => pull(`chat-${index}`, 'chat'));
+        const ops = Array.from({ length: 6 }, (_, index) => pull(`chat-${index}`, 'chat'));
 
         await applyOp(ops, {
-            ...context(legacyPullAndApply),
-            preparePull,
-        });
+            ...context(pullAndApply),
+            concurrency: 2,
+        } as Parameters<typeof applyOp>[1]);
 
-        expect(peakPrepare).toBe(4);
-        expect(peakApply).toBe(1);
-        expect(preparePull).toHaveBeenCalledTimes(8);
-        expect(legacyPullAndApply).not.toHaveBeenCalled();
+        expect(peak).toBe(2);
+        expect(pullAndApply).toHaveBeenCalledTimes(6);
     });
 
-    it('applies each prepared batch before preparing the next batch', async () => {
-        const events: string[] = [];
-        const preparePull = vi.fn(async (id: string) => {
-            events.push(`prepare:${id}`);
-            return async () => {
-                events.push(`apply:${id}`);
-            };
-        });
-        const ops = Array.from({ length: 8 }, (_, index) => pull(`chat-${index}`, 'chat'));
-
-        await applyOp(ops, {
-            ...context(vi.fn(async () => {})),
-            preparePull,
-        });
-
-        expect(events.indexOf('apply:chat-3')).toBeLessThan(events.indexOf('prepare:chat-4'));
-    });
-
-    it('does not overlap keep_both writes with prepared pull writes', async () => {
-        let activeWrites = 0;
-        let peakWrites = 0;
-        const write = async () => {
-            activeWrites++;
-            peakWrites = Math.max(peakWrites, activeWrites);
-            await new Promise((resolve) => setTimeout(resolve, 5));
-            activeWrites--;
-        };
-        const pullOp = pull('chat-pull', 'chat');
-        const keepBothOp: ApplyOp = { id: 'chat-both', kind: 'keep_both', type: 'chat' };
-
-        await applyOp([pullOp, keepBothOp], {
-            ...context(write),
-            preparePull: async () => write,
-            keepBoth: vi.fn(write),
-        });
-
-        expect(peakWrites).toBe(1);
-    });
-
-    it('falls back to serial pull when preparePull is unavailable', async () => {
+    it('keeps OG concurrency four when the backend does not override it', async () => {
         let active = 0;
         let peak = 0;
         const pullAndApply = vi.fn(async () => {
@@ -106,7 +54,7 @@ describe('applyOp pull concurrency', () => {
 
         await applyOp(ops, context(pullAndApply));
 
-        expect(peak).toBe(1);
+        expect(peak).toBe(4);
     });
 
     it('finishes one item type before starting the next type', async () => {

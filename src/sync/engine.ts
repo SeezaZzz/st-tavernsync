@@ -13,7 +13,7 @@ import { stFetchJson } from '../st-adapter/http';
 import { conflictSiblingId, tryChatFastForward } from '../sync-core/conflict';
 import { diffManifests, summarizeDiff } from '../sync-core/diff';
 import { mergeManifestItems } from '../sync-core/merge';
-import { applyOp, type PreparedPull } from '../sync-core/apply';
+import { applyOp } from '../sync-core/apply';
 import { buildPlan } from '../sync-core/plan';
 import { mergeSettingsThreeWay, sha256Hex } from '../st-adapter/normalize';
 import type { DiffEntry, Manifest, SyncItem } from '../sync-core/types';
@@ -667,7 +667,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         pullJournal?.update(item);
     };
 
-    const preparePull = async (id: string, type: SyncItem['type'], hash: string): Promise<PreparedPull> => {
+    const pullAndApply = async (id: string, type: SyncItem['type'], hash: string): Promise<void> => {
         checkpoint(id, type, hash, 'downloading');
         let boxed: Uint8Array;
         try {
@@ -681,7 +681,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                     'TavernSync',
                 );
                 pullJournal?.finish(id);
-                return async () => undefined;
+                return;
             }
             throw e;
         }
@@ -698,28 +698,25 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
                 'TavernSync',
             );
             pullJournal?.finish(id);
-            return async () => undefined;
+            return;
         }
 
-        checkpoint(id, type, hash, 'prepared');
-        return async () => {
-            checkpoint(id, type, hash, 'storing');
-            await storeBlob(hash, plain);
-            checkpoint(id, type, hash, 'applying');
-            if (type === 'settings') {
-                settingsChanged = true;
-                const pulled = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
-                const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
-                const full = JSON.parse(raw.settings || '{}') as Record<string, unknown>;
-                const merged = mergePulledSettings(full, pulled);
-                await applyLocalItem(id, type, new TextEncoder().encode(JSON.stringify(merged)), !!opts.dryRun);
-            } else {
-                if (type === 'persona') personasChanged = true;
-                await applyLocalItem(id, type, plain, !!opts.dryRun);
-            }
-            pullAppliedIds.add(id);
-            pullJournal?.finish(id);
-        };
+        checkpoint(id, type, hash, 'storing');
+        await storeBlob(hash, plain);
+        checkpoint(id, type, hash, 'applying');
+        if (type === 'settings') {
+            settingsChanged = true;
+            const pulled = JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>;
+            const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
+            const full = JSON.parse(raw.settings || '{}') as Record<string, unknown>;
+            const merged = mergePulledSettings(full, pulled);
+            await applyLocalItem(id, type, new TextEncoder().encode(JSON.stringify(merged)), !!opts.dryRun);
+        } else {
+            if (type === 'persona') personasChanged = true;
+            await applyLocalItem(id, type, plain, !!opts.dryRun);
+        }
+        pullAppliedIds.add(id);
+        pullJournal?.finish(id);
     };
 
     await applyOp(plan, {
@@ -731,8 +728,8 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             load: loadBlob,
             encrypt: (data) => rt.crypto.encryptBlob(data),
         }),
-        preparePull,
-        pullAndApply: async (id, type, hash) => (await preparePull(id, type, hash))(),
+        pullAndApply,
+        concurrency: rt.pullConcurrency,
         keepBoth: async (id, type) => {
             const entry = entries.find((x) => x.id === id);
             if (!entry?.remote) return;

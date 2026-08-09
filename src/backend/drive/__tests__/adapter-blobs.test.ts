@@ -57,11 +57,17 @@ describe('DriveAdapter blobs', () => {
         expect(client.createFile).not.toHaveBeenCalled();
     });
 
-    it('getBlob หาไฟล์จากชื่อ HMAC แล้วอ่านข้อมูล', async () => {
-        const client = clientStub([{ id: 'f1', name: 'hmac_aaa' }]);
+    it('getBlob ใช้ cached blobs listing หา file id โดยไม่ query ชื่อซ้ำทุกไฟล์', async () => {
+        const client = clientStub([
+            { id: 'f1', name: 'hmac_aaa' },
+            { id: 'f2', name: 'hmac_bbb' },
+        ]);
         const a = new DriveAdapter(client, cryptoStub, layout);
         expect([...(await a.getBlob('aaa'))]).toEqual([1, 2, 3]);
+        expect([...(await a.getBlob('bbb'))]).toEqual([1, 2, 3]);
         await expect(a.getBlob('zzz')).rejects.toThrow();
+        expect(client.listChildren).toHaveBeenCalledTimes(1);
+        expect(client.findChildByName).not.toHaveBeenCalled();
     });
 
     it('quota รวม storageQuota กับจำนวนไฟล์ใน blobs/', async () => {
