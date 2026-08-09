@@ -8,6 +8,17 @@ export class DriveAuthError extends Error {
     constructor() { super('Google authorization expired or revoked'); this.name = 'DriveAuthError'; }
 }
 
+export class DriveHttpError extends Error {
+    constructor(readonly status: number, readonly body: string) {
+        super(`Drive API ${status}: ${body}`);
+        this.name = 'DriveHttpError';
+    }
+}
+
+export type ResumableRangeResult =
+    | { kind: 'incomplete'; acknowledgedBytes: number }
+    | { kind: 'complete'; file: DriveFileMeta };
+
 export interface DriveFileMeta {
     id: string; name: string; size?: number; createdTime?: string;
     appProperties?: Record<string, string>;
@@ -17,12 +28,29 @@ export interface DriveTokenProvider { getToken(): Promise<string>; }
 export class DriveClient {
     constructor(private tp: DriveTokenProvider) {}
 
-    private async req(url: string, init: RequestInit = {}): Promise<Response> {
+    private async authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
         const token = await this.tp.getToken();
         const res = await fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) } });
         if (res.status === 401) throw new DriveAuthError();
-        if (!res.ok) throw new Error(`Drive API ${res.status}: ${await res.text().catch(() => '')}`);
         return res;
+    }
+
+    private async req(url: string, init: RequestInit = {}): Promise<Response> {
+        const res = await this.authedFetch(url, init);
+        if (!res.ok) throw new DriveHttpError(res.status, await res.text().catch(() => ''));
+        return res;
+    }
+
+    private async resumableResult(res: Response): Promise<ResumableRangeResult> {
+        if (res.status === 308) {
+            const range = res.headers.get('Range');
+            if (!range) return { kind: 'incomplete', acknowledgedBytes: 0 };
+            const match = /^bytes=0-(\d+)$/.exec(range);
+            if (!match) throw new TypeError(`Drive resumable upload returned invalid Range: ${range}`);
+            return { kind: 'incomplete', acknowledgedBytes: Number(match[1]) + 1 };
+        }
+        if (!res.ok) throw new DriveHttpError(res.status, await res.text().catch(() => ''));
+        return { kind: 'complete', file: await res.json() as DriveFileMeta };
     }
 
     async listChildren(parentId: string): Promise<DriveFileMeta[]> {
@@ -96,6 +124,58 @@ export class DriveClient {
         if (!session) throw new Error('resumable upload: no session URL');
         const res = await this.req(session, { method: 'PUT', body: data as unknown as BodyInit });
         return res.json();
+    }
+
+    async beginResumableFile(
+        parentId: string,
+        name: string,
+        totalBytes: number,
+        appProperties?: Record<string, string>,
+    ): Promise<string> {
+        const meta = { name, parents: [parentId], ...(appProperties ? { appProperties } : {}) };
+        const res = await this.req(`${UPLOAD}/files?uploadType=resumable`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Upload-Content-Type': 'application/octet-stream',
+                'X-Upload-Content-Length': String(totalBytes),
+            },
+            body: JSON.stringify(meta),
+        });
+        const sessionUrl = res.headers.get('Location');
+        if (!sessionUrl) throw new TypeError('resumable upload: no session URL');
+        return sessionUrl;
+    }
+
+    async queryResumableFile(sessionUrl: string, totalBytes: number): Promise<ResumableRangeResult> {
+        const res = await this.authedFetch(sessionUrl, {
+            method: 'PUT',
+            headers: {
+                'Content-Length': '0',
+                'Content-Range': `bytes */${totalBytes}`,
+            },
+        });
+        return this.resumableResult(res);
+    }
+
+    async putResumableRange(
+        sessionUrl: string,
+        data: Uint8Array,
+        start: number,
+        totalBytes: number,
+    ): Promise<ResumableRangeResult> {
+        if (data.byteLength === 0) throw new RangeError('resumable range must not be empty');
+        const end = start + data.byteLength - 1;
+        const res = await this.authedFetch(sessionUrl, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': String(data.byteLength),
+                'Content-Range': `bytes ${start}-${end}/${totalBytes}`,
+            },
+            body: data as unknown as BodyInit,
+        });
+        return this.resumableResult(res);
     }
 
     async getFileData(id: string): Promise<Uint8Array> {

@@ -113,4 +113,28 @@ describe('DriveClient', () => {
         expect(q).toContain('trashed=false');
         expect(seen[0]).toContain('pageSize=100');
     });
+
+    it('handles 308 and parses the acknowledged byte range', async () => {
+        stubFetch(async () => new Response('', {
+            status: 308,
+            headers: { Range: 'bytes=0-7' },
+        }));
+        const result = await new DriveClient(tp).putResumableRange(
+            'https://upload/session',
+            new Uint8Array(8),
+            0,
+            32,
+        );
+        expect(result).toEqual({ kind: 'incomplete', acknowledgedBytes: 8 });
+    });
+
+    it('queries an interrupted session with bytes */total', async () => {
+        const headers: Record<string, string>[] = [];
+        stubFetch(async (_url, init) => {
+            headers.push(init?.headers as Record<string, string>);
+            return new Response('', { status: 308, headers: { Range: 'bytes=0-15' } });
+        });
+        await new DriveClient(tp).queryResumableFile('https://upload/session', 32);
+        expect(headers[0]['Content-Range']).toBe('bytes */32');
+    });
 });
