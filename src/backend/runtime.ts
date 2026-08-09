@@ -3,10 +3,14 @@ import type { StorageAdapter } from './adapter';
 import { HttpStorageAdapter } from './http';
 import { DriveClient } from './drive/client';
 import { DriveAdapter, discoverDriveLayout } from './drive/adapter';
+import { discoverDrivePackLayout } from './drive/pack-layout';
+import { DrivePackStore } from './drive/pack-store';
+import { makeDrivePackCrypto } from './drive/pack-crypto';
+import type { DriveV2Runtime } from './drive/drive-v2-push';
 import { getSharedGisTokenProvider } from './drive/oauth';
 import { getSettings } from '../settings';
 import { seal, open, decodeSalt, encodeSalt, exportKeyRaw } from '../crypto';
-import { deriveDriveSubkeys, driveSaltFromFolderIdAsync, hmacNameFor, type DriveSubkeys } from '../crypto/subkeys';
+import { deriveDrivePackSubkeys, deriveDriveSubkeys, driveSaltFromFolderIdAsync, hmacNameFor, type DriveSubkeys } from '../crypto/subkeys';
 // sessionKey ถูก engine จัดการ — import getter ที่ engine เปิดไว้ (ดู Step 4)
 import { getSessionKey } from '../sync/engine';
 
@@ -126,5 +130,27 @@ export async function requireRuntime(): Promise<BackendRuntime> {
         saltProvider: new HttpSaltProvider(storage),
         storageNamespace: `http:${new URL(s.endpoint.trim()).host}`,
         pullConcurrency: 4,
+    };
+}
+
+export async function requireDriveV2Runtime(): Promise<DriveV2Runtime> {
+    const s = getSettings();
+    if (s.backendMode !== 'drive' || s.driveRootVersion !== 2) {
+        throw new Error('Drive v2 runtime requires a Drive v2 Root');
+    }
+    if (!s.driveClientId.trim()) throw new Error('No Google Client ID configured');
+    if (!s.driveFolderId.trim()) throw new Error('No Google Drive v2 Root configured');
+
+    const provider = getSharedGisTokenProvider(s.driveClientId.trim());
+    const client = new DriveClient(provider);
+    const layout = await discoverDrivePackLayout(client, s.driveFolderId.trim());
+    const sessionKey = getSessionKey();
+    if (!sessionKey?.extractable) throw new Error('Drive backend บังคับ E2EE — ปลดล็อก passphrase ก่อน');
+    const subkeys = await deriveDrivePackSubkeys(await exportKeyRaw(sessionKey), layout.rootId);
+    const packCrypto = makeDrivePackCrypto(subkeys);
+    return {
+        layout,
+        crypto: packCrypto,
+        store: new DrivePackStore(client, packCrypto, layout),
     };
 }

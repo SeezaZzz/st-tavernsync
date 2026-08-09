@@ -3,7 +3,8 @@
  */
 
 import { ConflictError, manifestVersionForPush, type StorageRevision } from '../backend/adapter';
-import { requireRuntime, type BackendRuntime } from '../backend/runtime';
+import { requireDriveV2Runtime, requireRuntime, type BackendRuntime } from '../backend/runtime';
+import { runDriveV2FullPush } from '../backend/drive/drive-v2-push';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
@@ -480,17 +481,49 @@ export interface SyncRunOptions {
     resolveConflict?: (entry: DiffEntry) => Promise<ConflictChoice>;
 }
 
+export async function runDriveV2FullPushFromEngine(options: {
+    onProgress?: (message: string) => void;
+}): Promise<{ message: string }> {
+    const settings = getSettings();
+    const scanStartedAt = performance.now();
+    options.onProgress?.('Scanning local…');
+    const scanned = await runScan(options.onProgress);
+    const scanMs = performance.now() - scanStartedAt;
+    const runtime = await requireDriveV2Runtime();
+    currentNamespace = `drive:${runtime.layout.rootId}`;
+    const items = Object.values(scanned.manifest.items).filter(item => !item.deleted);
+    const result = await runDriveV2FullPush({
+        runtime,
+        device: settings.deviceName || 'device',
+        items,
+        load: loadBlob,
+        scanMs,
+        onProgress: options.onProgress,
+    });
+    settings.lastItemCount = result.metrics.itemCount;
+    settings.lastStatusMessage = `Full Push complete · ${Math.round(result.metrics.elapsedMs / 1000)}s`;
+    saveSettings();
+    return { message: settings.lastStatusMessage };
+}
+
 export async function runSync(opts: SyncRunOptions): Promise<{ message: string }> {
     if (isGenerationBusy()) {
         throw new Error('Cannot sync while generation is in progress');
     }
 
     const s = getSettings();
+    if (s.backendMode === 'drive' && s.driveRootVersion === 2 && opts.direction !== 'push') {
+        throw new Error('Drive v2 Phase 1 supports Full Push only');
+    }
     if (s.e2eeEnabled) {
         await syncAccountSalt();
         if (!sessionKey) {
             throw new Error('E2EE enabled but no key on this device — enter passphrase once');
         }
+    }
+    if (s.backendMode === 'drive' && s.driveRootVersion === 2) {
+        if (opts.dryRun) throw new Error('Drive v2 Phase 1 does not support dry-run Push');
+        return runDriveV2FullPushFromEngine({ onProgress: opts.onProgress });
     }
     const rt = await requireRuntime();
     currentNamespace = rt.storageNamespace;

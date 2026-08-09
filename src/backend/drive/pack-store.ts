@@ -27,6 +27,11 @@ export class DrivePackStore {
         return this.listing;
     }
 
+    async hasCommittedSnapshot(): Promise<boolean> {
+        const manifests = await this.client.listChildren(this.layout.manifestsId);
+        return manifests.some(file => file.appProperties?.ts === 'commit-v2');
+    }
+
     async putPack(pack: EncryptedPack, options: PackUploadControl = {}): Promise<void> {
         const packs = await this.listPacks();
         const existing = packs.get(pack.name);

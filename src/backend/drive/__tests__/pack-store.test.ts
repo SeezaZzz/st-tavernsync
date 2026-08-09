@@ -54,7 +54,7 @@ function cryptoStub(): DrivePackCrypto {
     };
 }
 
-function makeStore(options: { existing?: DriveFileMeta[] } = {}) {
+function makeStore(options: { existing?: DriveFileMeta[]; manifests?: DriveFileMeta[] } = {}) {
     const files = new Map((options.existing ?? []).map(file => [file.name, file]));
     const sessions = new Map<string, { name: string; totalBytes: number }>();
     const events: string[] = [];
@@ -62,7 +62,7 @@ function makeStore(options: { existing?: DriveFileMeta[] } = {}) {
     const client = {
         beginCalls: 0,
         async listChildren(parentId: string): Promise<DriveFileMeta[]> {
-            return parentId === 'packs-id' ? [...files.values()] : [];
+            return parentId === 'packs-id' ? [...files.values()] : (options.manifests ?? []);
         },
         async beginResumableFile(
             _parentId: string,
@@ -106,6 +106,13 @@ function makeStore(options: { existing?: DriveFileMeta[] } = {}) {
 }
 
 describe('Drive pack store', () => {
+    it('detects an existing committed v2 snapshot', async () => {
+        const { store } = makeStore({
+            manifests: [{ id: 'm1', name: 'commit.enc', appProperties: { ts: 'commit-v2' } }],
+        });
+        await expect(store.hasCommittedSnapshot()).resolves.toBe(true);
+    });
+
     it('reuses a completed pack with matching name and size', async () => {
         const { store, client } = makeStore({ existing: [{ id: 'p1', name: 'pack-a', size: '32' }] });
         await store.putPack({ name: 'pack-a', bytes: new Uint8Array(32), chunks: [] });
