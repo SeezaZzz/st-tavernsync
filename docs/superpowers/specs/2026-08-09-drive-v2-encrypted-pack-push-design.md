@@ -1,7 +1,7 @@
 # Google Drive v2 Encrypted Pack Push Design
 
 **Date:** 2026-08-09
-**Status:** Draft for owner review
+**Status:** Owner approved
 **Scope:** Phase 1 — fresh-root Full Push only
 
 ## 1. Problem
@@ -71,17 +71,21 @@ After the v2 build is ready to test, an explicit user action performs this
 sequence:
 
 1. require an active Google connection and a destructive confirmation;
-2. move the entire current `TavernSync` v1 Root to Drive trash, including its
+2. create a new Root marked `ts=root-v2` with `packs/` and `manifests/`
+   children; if creation fails, leave v1 untouched;
+3. move the entire current `TavernSync` v1 Root to Drive trash, including its
    `blobs/` and `manifests/` children;
-3. clear the saved `driveFolderId`, remembered Drive E2EE key, Drive base state,
-   and status derived from the old Root;
-4. create a new Root marked `ts=root-v2`;
-5. create `packs/` and `manifests/` folders beneath it;
-6. derive new v2 subkeys from the new Root ID and the user's passphrase;
-7. run a Full Push from the PC.
+4. clear the saved v1 `driveFolderId`, remembered Drive E2EE key, Drive base
+   state, and status derived from the old Root;
+5. save the new v2 Root ID and derive new v2 subkeys from that ID and the user's
+   passphrase;
+6. run a Full Push from the PC.
 
 The old Root remains recoverable in Drive trash until the owner chooses to
 empty trash. No SillyTavern data on the PC or phone is deleted by this action.
+The same explicit reset may replace a previous v2 Root when repeating an
+empty-Root tuning benchmark. It always creates the replacement Root first and
+trashes the selected current Root only after creation succeeds.
 
 ## 6. Cryptographic Boundaries
 
