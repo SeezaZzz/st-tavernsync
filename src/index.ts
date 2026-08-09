@@ -10,7 +10,11 @@ import {
     type DriveAdapter,
     type DriveLayout,
 } from './backend/drive/adapter';
-import { discoverDrivePackLayout, resetDriveRootToV2 } from './backend/drive/pack-layout';
+import {
+    discoverDrivePackLayout,
+    recoverExistingDrivePackLayout,
+    resetDriveRootToV2,
+} from './backend/drive/pack-layout';
 import { canResetDriveV2, driveV2Visibility } from './backend/drive/drive-v2-ui-state';
 import { collectGarbage } from './backend/drive/gc';
 import { encodeSalt } from './crypto';
@@ -346,10 +350,16 @@ async function handleDriveConnect(): Promise<void> {
                     console.debug(LOG_PREFIX, 'drive connect: discover layout (ขอ token + หา/สร้างโฟลเดอร์)…');
                     layout = await discoverDriveLayout(client, s.driveFolderId.trim() || undefined);
                 } catch (e) {
-                    if (!(e instanceof MultipleRootsError)) throw e;
-                    const picked = await pickDriveRoot(e.roots);
-                    if (!picked) throw new Error('ยังไม่ได้เลือกโฟลเดอร์ TavernSync');
-                    layout = await discoverDriveLayout(client, picked);
+                    if (e instanceof MultipleRootsError) {
+                        const picked = await pickDriveRoot(e.roots);
+                        if (!picked) throw new Error('ยังไม่ได้เลือกโฟลเดอร์ TavernSync');
+                        layout = await discoverDriveLayout(client, picked);
+                    } else {
+                        // Root v1 IDs are local per device. After another device resets to v2,
+                        // a stale device must adopt the existing v2 Root rather than create/reset one.
+                        layout = await recoverExistingDrivePackLayout(client, e);
+                        s.driveRootVersion = 2;
+                    }
                 }
             }
             console.debug(LOG_PREFIX, `drive connect: layout ready (root=${layout.rootId.slice(0, 8)}…)`);

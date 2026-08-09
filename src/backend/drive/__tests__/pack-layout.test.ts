@@ -4,6 +4,7 @@ import { getSettings } from '../../../settings';
 import type { DriveClient, DriveFileMeta } from '../client';
 import {
     discoverDrivePackLayout,
+    recoverExistingDrivePackLayout,
     resetDriveRootToV2,
     type ResetDriveRootToV2Options,
 } from '../pack-layout';
@@ -111,5 +112,29 @@ describe('Drive v2 pack layout', () => {
         const client = layoutClient();
         await expect(discoverDrivePackLayout(client as unknown as DriveClient, 'known-v2'))
             .resolves.toEqual({ rootId: 'known-v2', packsId: 'packs-id', manifestsId: 'manifests-id' });
+    });
+
+    it('recovers a stale device from its broken v1 root by finding the existing v2 root', async () => {
+        const client = layoutClient({ roots: [{ id: 'shared-v2', name: 'TavernSync' }] });
+        const legacyError = new Error('TavernSync root is incomplete (missing manifests/ or blobs/)');
+
+        await expect(recoverExistingDrivePackLayout(
+            client as unknown as DriveClient,
+            legacyError,
+        )).resolves.toEqual({ rootId: 'shared-v2', packsId: 'packs-id', manifestsId: 'manifests-id' });
+        expect(client.createdRootProperties).toBeNull();
+        expect(client.trashed).toEqual([]);
+    });
+
+    it('preserves the legacy error when no existing v2 root can be found', async () => {
+        const client = layoutClient();
+        const legacyError = new Error('legacy root unavailable');
+
+        await expect(recoverExistingDrivePackLayout(
+            client as unknown as DriveClient,
+            legacyError,
+        )).rejects.toBe(legacyError);
+        expect(client.createdRootProperties).toBeNull();
+        expect(client.trashed).toEqual([]);
     });
 });

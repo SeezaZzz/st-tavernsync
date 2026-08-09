@@ -44,10 +44,25 @@ export async function discoverDrivePackLayout(
     if (knownRootId) {
         return layoutFromChildren(knownRootId, await client.listChildren(knownRootId));
     }
+    return (await findExistingDrivePackLayout(client)) ?? createDrivePackLayout(client);
+}
+
+export async function findExistingDrivePackLayout(
+    client: DriveClient,
+): Promise<DrivePackLayout | null> {
     const roots = await client.searchRootFolders('root-v2');
     if (roots.length > 1) throw new MultipleDrivePackRootsError(roots);
-    if (roots.length === 0) return createDrivePackLayout(client);
+    if (roots.length === 0) return null;
     return layoutFromChildren(roots[0].id, await client.listChildren(roots[0].id));
+}
+
+export async function recoverExistingDrivePackLayout(
+    client: DriveClient,
+    legacyError: unknown,
+): Promise<DrivePackLayout> {
+    const layout = await findExistingDrivePackLayout(client);
+    if (!layout) throw legacyError;
+    return layout;
 }
 
 export async function resetDriveRootToV2(options: ResetDriveRootToV2Options): Promise<DrivePackLayout> {
