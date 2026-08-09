@@ -54,7 +54,11 @@ function cryptoStub(): DrivePackCrypto {
     };
 }
 
-function makeStore(options: { existing?: DriveFileMeta[]; manifests?: DriveFileMeta[] } = {}) {
+function makeStore(options: {
+    existing?: DriveFileMeta[];
+    manifests?: DriveFileMeta[];
+    uploadedMetadataOmitsSize?: boolean;
+} = {}) {
     const files = new Map((options.existing ?? []).map(file => [file.name, file]));
     const sessions = new Map<string, { name: string; totalBytes: number }>();
     const events: string[] = [];
@@ -77,7 +81,11 @@ function makeStore(options: { existing?: DriveFileMeta[]; manifests?: DriveFileM
         async putResumableRange(session: string): Promise<ResumableRangeResult> {
             const pending = sessions.get(session);
             if (!pending) throw new Error('unknown session');
-            const file = { id: `id:${pending.name}`, name: pending.name, size: String(pending.totalBytes) };
+            const file: DriveFileMeta = {
+                id: `id:${pending.name}`,
+                name: pending.name,
+                ...(options.uploadedMetadataOmitsSize ? {} : { size: String(pending.totalBytes) }),
+            };
             files.set(file.name, file);
             events.push(`upload:${file.name}`);
             return { kind: 'complete', file };
@@ -123,6 +131,14 @@ describe('Drive pack store', () => {
         const { store } = makeStore({ existing: [{ id: 'p1', name: 'pack-a', size: '31' }] });
         await expect(store.verifyPacks([{ name: 'pack-a', byteLength: 32 }]))
             .rejects.toThrow('pack size mismatch');
+    });
+
+    it('verifies a newly uploaded pack when Drive omits size from the completion response', async () => {
+        const { store } = makeStore({ uploadedMetadataOmitsSize: true });
+        const pack = { name: 'pack-a', bytes: new Uint8Array(32), chunks: [] };
+        await store.putPack(pack);
+        await expect(store.verifyPacks([{ name: pack.name, byteLength: pack.bytes.byteLength }]))
+            .resolves.toBeUndefined();
     });
 
     it('refuses manifest publication before pack verification', async () => {

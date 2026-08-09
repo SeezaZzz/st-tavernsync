@@ -48,7 +48,10 @@ export class DrivePackStore {
             pack,
             ...options,
         });
-        packs.set(pack.name, file);
+        packs.set(pack.name, {
+            ...file,
+            size: file.size ?? String(pack.bytes.byteLength),
+        });
         this.verifiedPacks = null;
     }
 
