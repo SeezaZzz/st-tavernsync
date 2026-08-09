@@ -19,7 +19,7 @@ export type ResumableRangeResult =
     | { kind: 'complete'; file: DriveFileMeta };
 
 export interface DriveFileMeta {
-    id: string; name: string; size?: number; createdTime?: string;
+    id: string; name: string; size?: number | string; createdTime?: string;
     appProperties?: Record<string, string>;
 }
 export interface DriveTokenProvider { getToken(): Promise<string>; }
