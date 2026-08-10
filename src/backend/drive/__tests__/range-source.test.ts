@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { DriveAuthError, DriveHttpError } from '../client';
 import { DriveRangeSource } from '../range-source';
 
 describe('DriveRangeSource', () => {
@@ -27,5 +28,29 @@ describe('DriveRangeSource', () => {
         await expect(source.readChunk({ packName: 'pack-a', offset: 10, boxedLength: 20 }))
             .rejects.toThrow(/range/i);
         expect(getFileRange).not.toHaveBeenCalled();
+    });
+
+    it.each([408, 429, 500])('retries Drive HTTP %s before succeeding', async status => {
+        const getFileRange = vi.fn()
+            .mockRejectedValueOnce(new DriveHttpError(status, 'temporary'))
+            .mockResolvedValue(new Uint8Array([1]));
+        const source = new DriveRangeSource({
+            listPacks: async () => new Map([['pack', { id: 'file', name: 'pack', size: '1' }]]),
+        }, { getFileRange }, { delays: [0], sleep: async () => undefined });
+
+        await expect(source.readChunk({ packName: 'pack', offset: 0, boxedLength: 1 }))
+            .resolves.toEqual(new Uint8Array([1]));
+        expect(getFileRange).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry expired Google authorization', async () => {
+        const getFileRange = vi.fn().mockRejectedValue(new DriveAuthError());
+        const source = new DriveRangeSource({
+            listPacks: async () => new Map([['pack', { id: 'file', name: 'pack', size: '1' }]]),
+        }, { getFileRange }, { delays: [0], sleep: async () => undefined });
+
+        await expect(source.readChunk({ packName: 'pack', offset: 0, boxedLength: 1 }))
+            .rejects.toBeInstanceOf(DriveAuthError);
+        expect(getFileRange).toHaveBeenCalledOnce();
     });
 });
