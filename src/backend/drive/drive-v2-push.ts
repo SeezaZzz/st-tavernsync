@@ -130,8 +130,7 @@ class BoundedPackUploadQueue {
         this.firstUploadAt ??= this.now();
         let succeeded = false;
 
-        let task!: Promise<void>;
-        task = this.store.putPack(pack, {
+        const task = this.store.putPack(pack, {
             signal: this.signal,
             resume: this.resumeSessions?.get(pack.name),
             onRetry: () => { this.retryCount += 1; },

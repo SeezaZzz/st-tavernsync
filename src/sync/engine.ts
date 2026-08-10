@@ -475,7 +475,7 @@ async function resolveChatConflict(
     remoteHash: string,
     rt: BackendRuntime,
 ): Promise<'local' | 'remote' | 'both' | 'fast_forward_local' | 'fast_forward_remote'> {
-    let localBytes = await loadBlob(localHash);
+    const localBytes = await loadBlob(localHash);
     if (!localBytes || localBytes.byteLength === 0) {
         // re-scan needed; treat as both
         return 'both';
