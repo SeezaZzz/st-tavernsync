@@ -2,13 +2,17 @@
 
 export type ItemType =
     | 'settings'
+    | 'extension'
     | 'preset'
     | 'worldinfo'
     | 'persona'
     | 'character'
+    | 'characterstate'
+    | 'characterasset'
     | 'chat'
     | 'group'
     | 'groupchat'
+    | 'userimage'
     | 'quickreply'
     | 'theme';
 

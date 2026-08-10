@@ -23,6 +23,9 @@ export type DriveV2PullProgressEvent =
         itemType: string;
         itemsPerSecond: number;
         activeWriters: number;
+        downloadedPacks: number;
+        uniquePacksRequired: number;
+        packDownloadRequests: number;
         etaSeconds: number;
     }
     | {
@@ -69,7 +72,8 @@ export function formatDriveV2PullProgress(event: DriveV2PullProgressEvent): stri
             return `Downloading packs ${event.completedPacks}/${event.totalPacks} · ${mbps.toFixed(1)} MB/s · ETA ${formatEta(event.etaSeconds)}`;
         }
         case 'apply':
-            return `Restoring ${event.completedItems}/${event.totalItems} · `
+            return `Packs ${event.downloadedPacks}/${event.uniquePacksRequired} · `
+                + `Restoring ${event.completedItems}/${event.totalItems} · `
                 + `${event.itemsPerSecond.toFixed(1)} items/s · ${event.activeWriters} writers · `
                 + `ETA ${formatEta(event.etaSeconds)}`;
         case 'delete':

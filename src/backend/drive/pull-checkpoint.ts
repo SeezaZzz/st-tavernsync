@@ -1,8 +1,4 @@
-import {
-    getSettings,
-    saveSettings,
-    type DriveV2PullCheckpointState,
-} from '../../settings';
+import type { DriveV2PullCheckpointState } from '../../settings';
 
 export type { DriveV2PullCheckpointState } from '../../settings';
 
@@ -11,14 +7,47 @@ export interface PullCheckpointStore {
     save(value: DriveV2PullCheckpointState | null): void;
 }
 
-function extensionCheckpointStore(): PullCheckpointStore {
+interface LocalStorageLike {
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): void;
+    removeItem(key: string): void;
+}
+
+const CHECKPOINT_STORAGE_KEY = 'tavernsync:drive-v2-pull-checkpoint';
+const memoryStorageValues = new Map<string, string>();
+const memoryStorage: LocalStorageLike = {
+    getItem: key => memoryStorageValues.get(key) ?? null,
+    setItem: (key, value) => { memoryStorageValues.set(key, value); },
+    removeItem: key => { memoryStorageValues.delete(key); },
+};
+
+export function createLocalStorageCheckpointStore(
+    storage: LocalStorageLike,
+    key = CHECKPOINT_STORAGE_KEY,
+): PullCheckpointStore {
     return {
-        load: () => getSettings().driveV2PullCheckpoint,
+        load: () => {
+            const raw = storage.getItem(key);
+            if (!raw) return null;
+            try {
+                return JSON.parse(raw) as DriveV2PullCheckpointState;
+            } catch {
+                storage.removeItem(key);
+                return null;
+            }
+        },
         save: value => {
-            getSettings().driveV2PullCheckpoint = value;
-            saveSettings();
+            if (value === null) {
+                storage.removeItem(key);
+                return;
+            }
+            storage.setItem(key, JSON.stringify(value));
         },
     };
+}
+
+function extensionCheckpointStore(): PullCheckpointStore {
+    return createLocalStorageCheckpointStore(globalThis.localStorage ?? memoryStorage);
 }
 
 export class DriveV2PullCheckpoint {

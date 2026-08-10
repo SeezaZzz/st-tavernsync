@@ -40,9 +40,9 @@ export interface AdaptivePullQueueOptions {
 }
 
 const DEFAULT_LIMITS: PullLimits = {
-    initial: { small: 8, medium: 4, heavy: 1, serial: 1 },
-    minimum: { small: 4, medium: 2, heavy: 1, serial: 1 },
-    maximum: { small: 16, medium: 8, heavy: 2, serial: 1 },
+    initial: { small: 12, medium: 8, heavy: 2, serial: 1 },
+    minimum: { small: 4, medium: 4, heavy: 1, serial: 1 },
+    maximum: { small: 16, medium: 12, heavy: 4, serial: 1 },
 };
 
 export function classifyPullJob(
@@ -55,12 +55,22 @@ export function classifyPullJob(
         const characterId = `character/${avatar}`;
         if (remoteIds.has(characterId)) dependencies.push(characterId);
     }
+    if (item.type === 'characterasset') {
+        const encodedName = item.id.split('/')[1];
+        const characterId = `character/${decodeURIComponent(encodedName)}.png`;
+        if (remoteIds.has(characterId)) dependencies.push(characterId);
+    }
+    if (item.type === 'characterstate') {
+        const avatar = item.id.split('/').slice(1).join('/');
+        const characterId = `character/${avatar}`;
+        if (remoteIds.has(characterId)) dependencies.push(characterId);
+    }
 
-    const cost: PullCostClass = item.type === 'settings' || item.type === 'persona'
+    const cost: PullCostClass = item.type === 'settings'
         ? 'serial'
-        : item.size > 4 * 1024 * 1024
+        : item.type === 'character' || item.size > 4 * 1024 * 1024
             ? 'heavy'
-            : item.size > 256 * 1024 || item.type === 'chat' || item.type === 'character'
+            : item.size > 256 * 1024 || item.type === 'chat'
                 ? 'medium'
                 : 'small';
 
@@ -117,7 +127,7 @@ export function runAdaptivePullQueue(
             if (samples.length < 16) return;
             const p95 = percentile95(samples.splice(0));
             if (previousP95[cost] > 0 && p95 >= previousP95[cost] * 2) {
-                limits[cost] = Math.max(bounds.minimum[cost], limits[cost] - 1);
+                limits[cost] = Math.max(bounds.minimum[cost], Math.floor(limits[cost] / 2));
             } else {
                 limits[cost] = Math.min(bounds.maximum[cost], limits[cost] + 1);
             }

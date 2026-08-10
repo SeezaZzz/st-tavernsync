@@ -197,9 +197,11 @@ export class DriveClient {
             throw new RangeError('Drive ignored the requested byte range');
         }
         const contentRange = res.headers.get('Content-Range');
-        const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(contentRange ?? '');
-        if (!match || Number(match[1]) !== start || Number(match[2]) !== end) {
-            throw new RangeError('Drive returned an invalid byte range');
+        if (contentRange !== null) {
+            const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(contentRange);
+            if (!match || Number(match[1]) !== start || Number(match[2]) !== end) {
+                throw new RangeError('Drive returned an invalid byte range');
+            }
         }
         const bytes = new Uint8Array(await res.arrayBuffer());
         if (bytes.byteLength !== length) throw new RangeError('Drive returned a truncated byte range');

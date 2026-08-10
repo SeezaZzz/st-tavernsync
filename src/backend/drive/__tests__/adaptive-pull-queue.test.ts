@@ -41,6 +41,20 @@ function testLimits(overrides: Partial<Record<PullCostClass, number>>) {
 }
 
 describe('adaptive rolling pull queue', () => {
+    it('keeps settings serial but allows persona image preparation to run concurrently', () => {
+        const [settings, persona] = jobs(['settings/root', 'persona/a.png']);
+
+        expect(settings.cost).toBe('serial');
+        expect(persona.cost).not.toBe('serial');
+    });
+
+    it('treats character imports as heavy while chats use the wider medium queue', () => {
+        const [character, chat] = jobs(['character/A.png', 'chat/A.png/day-1']);
+
+        expect(character.cost).toBe('heavy');
+        expect(chat.cost).toBe('medium');
+    });
+
     it('starts the next ready job as soon as one slot frees without a batch barrier', async () => {
         const gate = deferred<void>();
         const started: string[] = [];
@@ -71,6 +85,28 @@ describe('adaptive rolling pull queue', () => {
         expect(events).toContain('preset/x');
     });
 
+    it('waits for a matching character before restoring its assets', async () => {
+        const events: string[] = [];
+
+        await runAdaptivePullQueue({
+            jobs: jobs(['characterasset/A/bgm/theme.ogg', 'character/A.png']),
+            async run(job) { events.push(job.item.id); },
+        });
+
+        expect(events).toEqual(['character/A.png', 'characterasset/A/bgm/theme.ogg']);
+    });
+
+    it('waits for a matching character import before restoring favorite state', async () => {
+        const events: string[] = [];
+
+        await runAdaptivePullQueue({
+            jobs: jobs(['characterstate/A.png', 'character/A.png']),
+            async run(job) { events.push(job.item.id); },
+        });
+
+        expect(events).toEqual(['character/A.png', 'characterstate/A.png']);
+    });
+
     it('raises a class after stable completions and lowers it after latency doubles', async () => {
         const snapshots: AdaptivePullSnapshot[] = [];
         const durations = [...Array<number>(16).fill(10), ...Array<number>(16).fill(40)];
@@ -79,13 +115,15 @@ describe('adaptive rolling pull queue', () => {
 
         await runAdaptivePullQueue({
             jobs: jobs(Array.from({ length: 32 }, (_, index) => `preset/${index}`)),
+            limits: testLimits({ small: 1 }),
             now: () => time,
             async run() { time += durations[durationIndex++] ?? 1; },
             onSnapshot(value) { snapshots.push(value); },
         });
 
-        expect(snapshots.some(value => value.limits.small > 8)).toBe(true);
-        expect(snapshots.at(-1)!.limits.small).toBeLessThanOrEqual(8);
+        const peakLimit = Math.max(...snapshots.map(value => value.limits.small));
+        expect(peakLimit).toBeGreaterThan(1);
+        expect(snapshots.at(-1)!.limits.small).toBeLessThan(peakLimit);
     });
 
     it('rejects dependency cycles rather than hanging', async () => {

@@ -60,6 +60,58 @@ async function itemFixture(
 }
 
 describe('Drive v2 pack reader', () => {
+    it('downloads one shared pack once for concurrent item readers', async () => {
+        const pack = new Uint8Array(10).fill(1);
+        const source = sourceFixture({ shared: pack });
+        const reader = new DriveV2PackReader(source, cryptoStub(), 2);
+        const items = await Promise.all(Array.from({ length: 10 }, (_, index) => itemFixture(
+            `item-${index}`,
+            [{ packName: 'shared', offset: index, bytes: pack.subarray(index, index + 1) }],
+        )));
+
+        await Promise.all(items.map(item => reader.readItem(item)));
+
+        expect(source.reads.get('shared')).toBe(1);
+        expect(reader.getPackDownloadRequestCount()).toBe(1);
+    });
+
+    it('downloads two required packs exactly twice', async () => {
+        const source = sourceFixture({
+            left: new Uint8Array([1]),
+            right: new Uint8Array([2]),
+        });
+        const reader = new DriveV2PackReader(source, cryptoStub(), 2);
+
+        await Promise.all([
+            reader.readItem(await itemFixture('left-item', [
+                { packName: 'left', offset: 0, bytes: new Uint8Array([1]) },
+            ])),
+            reader.readItem(await itemFixture('right-item', [
+                { packName: 'right', offset: 0, bytes: new Uint8Array([2]) },
+            ])),
+        ]);
+
+        expect(reader.getPackDownloadRequestCount()).toBe(2);
+    });
+
+    it('retries a transient pack failure and authenticates the recovered item', async () => {
+        let requests = 0;
+        const reader = new DriveV2PackReader({
+            async readPack(): Promise<Uint8Array> {
+                requests += 1;
+                if (requests < 3) throw new Error('temporary network failure');
+                return new Uint8Array([7]);
+            },
+        }, cryptoStub(), 2);
+        const item = await itemFixture('recovered', [
+            { packName: 'retry-pack', offset: 0, bytes: new Uint8Array([7]) },
+        ]);
+
+        await expect(reader.readItem(item)).resolves.toEqual(new Uint8Array([7]));
+        expect(reader.getPackDownloadRequestCount()).toBe(3);
+        expect(reader.getDownloadedPackCount()).toBe(1);
+    });
+
     it('never retains more than two packs and reuses a shared pack', async () => {
         const source = sourceFixture({
             'pack-a': new Uint8Array([1]),

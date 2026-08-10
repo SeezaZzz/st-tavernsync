@@ -41,8 +41,11 @@ describe('Drive v2 UI state', () => {
             itemType: 'chat',
             itemsPerSecond: 24.5,
             activeWriters: 7,
+            downloadedPacks: 8,
+            uniquePacksRequired: 30,
+            packDownloadRequests: 8,
             etaSeconds: 66,
-        })).toBe('Restoring 724/2347 · 24.5 items/s · 7 writers · ETA 01:06');
+        })).toBe('Packs 8/30 · Restoring 724/2347 · 24.5 items/s · 7 writers · ETA 01:06');
         expect(formatDriveV2PullProgress({ stage: 'delete', totalItems: 3 }))
             .toBe('Deleting 3 items');
     });

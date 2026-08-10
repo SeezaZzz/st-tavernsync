@@ -56,6 +56,14 @@ export async function findExistingDrivePackLayout(
     return layoutFromChildren(roots[0].id, await client.listChildren(roots[0].id));
 }
 
+export async function listExistingDrivePackLayouts(
+    client: DriveClient,
+): Promise<DrivePackLayout[]> {
+    const roots = await client.searchRootFolders('root-v2');
+    return Promise.all(roots.map(async root =>
+        layoutFromChildren(root.id, await client.listChildren(root.id))));
+}
+
 export async function recoverExistingDrivePackLayout(
     client: DriveClient,
     legacyError: unknown,

@@ -161,6 +161,15 @@ describe('DriveClient', () => {
         await expect(new DriveClient(tp).getFileRange('file-1', 10, 10)).resolves.toHaveLength(10);
     });
 
+    it('accepts a complete 206 body when CORS hides Content-Range', async () => {
+        stubFetch(async (_url, init) => {
+            expect((init?.headers as Record<string, string>).Range).toBe('bytes=10-19');
+            return new Response(new Uint8Array(10), { status: 206 });
+        });
+
+        await expect(new DriveClient(tp).getFileRange('file-1', 10, 10)).resolves.toHaveLength(10);
+    });
+
     it.each([
         new Response(new Uint8Array(10), { status: 200 }),
         new Response(new Uint8Array(9), { status: 206, headers: { 'Content-Range': 'bytes 10-18/100' } }),

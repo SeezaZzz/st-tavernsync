@@ -2,6 +2,11 @@ import type { SyncScopeSettings } from '../settings';
 import { LOG_PREFIX } from '../settings';
 import { emptyManifest, type Manifest, type SyncItem } from '../sync-core/types';
 import { getSyncStore } from '../state/store';
+import { mapPool } from '../util/pool';
+import { listCharacterAssets } from './character-assets';
+import { listCharacterStates } from './character-state';
+import { listExtensionStates } from './extension-state';
+import { makeGroupImageItem } from './user-images';
 import {
     fetchSettingsBundle,
     listCharacters,
@@ -25,6 +30,19 @@ export interface ScanResult {
     itemCount: number;
     /** ids whose plaintext bytes were stored/refreshed in localforage */
     refreshedBlobIds: string[];
+}
+
+function characterAssetFolderCandidates(avatar: string, displayName: string): string[] {
+    const avatarFolder = avatar.replace(/\.png$/i, '');
+    const displayFolder = [...displayName]
+        .filter((character) => {
+            const codePoint = character.codePointAt(0) ?? 0;
+            const isControl = codePoint <= 31 || (codePoint >= 128 && codePoint <= 159);
+            return !isControl && !'<>:"/\\|?*'.includes(character);
+        })
+        .join('')
+        .replace(/[. ]+$/g, '');
+    return [...new Set([avatarFolder, displayFolder].filter(Boolean))];
 }
 
 async function loadChatCache(): Promise<ChatMetaCache> {
@@ -81,6 +99,11 @@ export async function scanLocal(opts: {
         items[item.id] = item;
         await storeBlob(item.hash, bytes);
         refreshedBlobIds.push(item.id);
+        for (const extension of await listExtensionStates()) {
+            items[extension.item.id] = extension.item;
+            await storeBlob(extension.item.hash, extension.bytes);
+            refreshedBlobIds.push(extension.item.id);
+        }
     }
 
     if (scope.lorebooks) {
@@ -132,7 +155,19 @@ export async function scanLocal(opts: {
     }
 
     if (scope.characters) {
-        for (const { item, bytes } of characters) {
+        await mapPool(characters, 4, async ({ item, bytes, avatar, name }) => {
+            items[item.id] = item;
+            await storeBlob(item.hash, bytes);
+            refreshedBlobIds.push(item.id);
+            for (const assetFolder of characterAssetFolderCandidates(avatar, name)) {
+                for (const asset of await listCharacterAssets(assetFolder)) {
+                    items[asset.item.id] = asset.item;
+                    await storeBlob(asset.item.hash, asset.bytes);
+                    refreshedBlobIds.push(asset.item.id);
+                }
+            }
+        });
+        for (const { item, bytes } of await listCharacterStates()) {
             items[item.id] = item;
             await storeBlob(item.hash, bytes);
             refreshedBlobIds.push(item.id);
@@ -162,6 +197,12 @@ export async function scanLocal(opts: {
             items[item.id] = item;
             await storeBlob(item.hash, bytes);
             refreshedBlobIds.push(item.id);
+            const groupImage = await makeGroupImageItem(bytes);
+            if (groupImage) {
+                items[groupImage.item.id] = groupImage.item;
+                await storeBlob(groupImage.item.hash, groupImage.bytes);
+                refreshedBlobIds.push(groupImage.item.id);
+            }
         }
         for (const { item, bytes } of groupChats) {
             items[item.id] = item;

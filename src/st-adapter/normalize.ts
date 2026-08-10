@@ -52,12 +52,13 @@ const KEY_SECRET_PATTERNS = [
 ];
 
 function isSecretKey(key: string): boolean {
+    if (key === 'secret-id') return false;
     return KEY_SECRET_PATTERNS.some((re) => re.test(key));
 }
 
 /**
  * Strip device-local and secret fields from settings before hash/sync.
- * Always removes extensionSettings.tavernsync to avoid feedback loops.
+ * Always removes extension_settings.tavernsync to avoid feedback loops.
  */
 export function stripSettingsForSync(settings: Record<string, unknown>): Record<string, unknown> {
     const clone = structuredClone(settings) as Record<string, unknown>;
@@ -99,11 +100,11 @@ export function stripSettingsForSync(settings: Record<string, unknown>): Record<
     // Strip secrets recursively
     stripSecretsDeep(clone);
 
-    if (isPlainObject(clone.extensionSettings)) {
-        const ext = clone.extensionSettings as Record<string, unknown>;
+    if (isPlainObject(clone.extension_settings)) {
+        const ext = clone.extension_settings as Record<string, unknown>;
         delete ext.tavernsync;
         // Strip any nested api keys in other extensions' settings is heavy-handed;
-        // still strip secret-looking keys inside extensionSettings.
+        // still strip secret-looking keys inside extension settings.
         stripSecretsDeep(ext);
     }
 

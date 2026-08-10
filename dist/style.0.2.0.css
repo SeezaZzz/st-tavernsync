@@ -38,3 +38,7 @@
     width: min(100%, 16rem);
 }
 
+body:has(.popup[open] .tavernsync-drive-v2-choice) #toast-container {
+    visibility: hidden;
+}
+

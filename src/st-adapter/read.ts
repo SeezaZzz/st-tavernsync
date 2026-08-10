@@ -204,10 +204,15 @@ interface CharListEntry {
     json_data?: string;
 }
 
-export async function listCharacters(): Promise<{ item: SyncItem; bytes: Uint8Array; avatar: string }[]> {
+export async function listCharacters(): Promise<{
+    item: SyncItem;
+    bytes: Uint8Array;
+    avatar: string;
+    name: string;
+}[]> {
     const chars = await stFetchJson<CharListEntry[]>('/api/characters/all', {});
     if (!Array.isArray(chars)) return [];
-    const out: { item: SyncItem; bytes: Uint8Array; avatar: string }[] = [];
+    const out: { item: SyncItem; bytes: Uint8Array; avatar: string; name: string }[] = [];
     for (const ch of chars) {
         if (!ch?.avatar) continue;
         // Prefer PNG bytes for hash (CONTEXT). Fallback to json_data if fetch fails.
@@ -221,6 +226,7 @@ export async function listCharacters(): Promise<{ item: SyncItem; bytes: Uint8Ar
         const hash = await sha256Hex(bytes);
         out.push({
             avatar: ch.avatar,
+            name: ch.name || ch.avatar.replace(/\.png$/i, ''),
             bytes,
             item: {
                 id: `character/${ch.avatar}`,

@@ -39,3 +39,39 @@ it('keeps destructive Drive maintenance controls inside Advanced with readable w
     }
     expect(css).toMatch(/\.tavernsync-maintenance-button\s*\{[^}]*width:\s*min\(100%,\s*16rem\)/s);
 });
+
+it('keeps storage schema jargon out of public Drive copy', () => {
+    const html = readFileSync(new URL('../../../panel.html', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../../index.ts', import.meta.url), 'utf8');
+    const engine = readFileSync(new URL('../../sync/engine.ts', import.meta.url), 'utf8');
+
+    expect(html).not.toMatch(/>[^<]*(?:Drive v[12]|packs?\/blobs?|Root)[^<]*</i);
+    expect(`${html}\n${source}\n${engine}`).not.toMatch(/Drive v[12]/);
+    for (const text of [
+        'Connected to Drive v2',
+        'TavernSync ${files.length} packs',
+        'Creating fresh Drive v2 root',
+        'Drive v2 Root ready',
+        'packs/blobs',
+        'เปิดข้อมูลสำรองไม่ได้: ${String(error)}',
+    ]) {
+        expect(source).not.toContain(text);
+    }
+});
+
+it('routes each manual Drive action through storage activation', () => {
+    const source = readFileSync(new URL('../../index.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain("ensureE2eeReady('push')");
+    expect(source).toContain("ensureE2eeReady('pull')");
+    expect(source).toContain("ensureE2eeReady('status')");
+    expect(source).toContain('activateDriveStorage({');
+});
+
+it('hides progress toasts while the snapshot-choice popup is open', () => {
+    const css = readFileSync(new URL('../../style.css', import.meta.url), 'utf8');
+
+    expect(css).toMatch(
+        /body:has\(\.popup\[open\] \.tavernsync-drive-v2-choice\) #toast-container\s*\{[^}]*visibility:\s*hidden/s,
+    );
+});

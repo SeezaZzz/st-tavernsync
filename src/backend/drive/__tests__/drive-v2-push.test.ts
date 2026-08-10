@@ -162,7 +162,7 @@ describe('Drive v2 Full Push', () => {
 
     it('blocks the ambiguous v2 both direction', async () => {
         await expect(runSync({ direction: 'both' }))
-            .rejects.toThrow('Drive v2 requires an explicit Push or Pull direction');
+            .rejects.toThrow('Google Drive backup requires an explicit Push or Pull direction');
     });
 
     it('resumes an auth-paused pack with the same ciphertext and session', async () => {

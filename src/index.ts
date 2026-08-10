@@ -1,7 +1,7 @@
 import './style.css';
 import { HttpStorageAdapter } from './backend/http';
 import { requireDriveV2Runtime, requireRuntime } from './backend/runtime';
-import { DriveClient, type DriveFileMeta } from './backend/drive/client';
+import { DriveClient } from './backend/drive/client';
 import { DriveUploadPausedError } from './backend/drive/pack-uploader';
 import { GisTokenProvider, getSharedGisTokenProvider } from './backend/drive/oauth';
 import {
@@ -12,6 +12,10 @@ import {
     resetDriveRootToV2,
 } from './backend/drive/pack-layout';
 import { resolveDriveLayoutForConnect } from './backend/drive/connect-layout';
+import {
+    activateDriveStorage,
+    type DriveStorageAction,
+} from './backend/drive/storage-activation';
 import { prepareDriveRootKeyTransition } from './backend/drive/root-key-transition';
 import {
     canResetDriveV2,
@@ -209,14 +213,96 @@ function bindScopeCheckbox(id: string, key: keyof SyncScopeSettings): void {
     });
 }
 
-async function ensureE2eeReady(): Promise<boolean> {
+async function adoptDriveStorage(layout: { rootId: string }): Promise<void> {
+    const s = getSettings();
+    const rootChanged = await prepareDriveRootKeyTransition(
+        s.driveFolderId,
+        layout.rootId,
+        () => lockE2ee({ forgetDevice: true }),
+    );
+    s.driveFolderId = layout.rootId;
+    s.driveRootVersion = 2;
+    s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(layout.rootId));
+    saveSettings();
+    if (rootChanged) {
+        console.info(LOG_PREFIX, 'Google Drive storage changed; invalidated the previous encryption key');
+    }
+}
+
+async function prepareDriveEncryption(
+    action: DriveStorageAction,
+    passphrase: string,
+): Promise<boolean> {
+    const s = getSettings();
+    const resolution = await activateDriveStorage({
+        action,
+        client: makeDriveClient(),
+        passphrase,
+        rememberedRootId: s.driveFolderId,
+        adopt: adoptDriveStorage,
+        unlock: unlockE2ee,
+    });
+    if (resolution.kind === 'missing') {
+        toastr.info(
+            action === 'pull' || action === 'status'
+                ? 'ยังไม่มีข้อมูลสำรองบน Google Drive — กด Push จากเครื่องที่มีข้อมูลก่อน'
+                : 'ยังไม่มีข้อมูลสำรอง — กด Push เพื่อสร้างที่เก็บใหม่',
+            'TavernSync',
+        );
+        return false;
+    }
+    if (resolution.kind === 'ready') {
+        const s = getSettings();
+        s.lastItemCount = resolution.itemCount;
+        s.lastStatusMessage = 'Backup ready';
+        saveSettings();
+        $('#tavernsync_quota_line').text(`Backup ready · ${resolution.itemCount} items`);
+    } else {
+        $('#tavernsync_quota_line').text('New storage ready · Push this device');
+    }
+    $('#tavernsync_passphrase').val('');
+    updateE2eeUi();
+    return true;
+}
+
+async function ensureE2eeReady(
+    action: DriveStorageAction,
+    interactive = true,
+): Promise<boolean> {
     const s = getSettings();
     if (!s.e2eeEnabled) return true;
     if (hasE2eeKey()) return true;
-    await tryRestoreE2eeKey();
+    if (s.backendMode !== 'drive' || s.driveFolderId.trim()) {
+        await tryRestoreE2eeKey();
+    }
     if (hasE2eeKey()) {
         updateE2eeUi();
         return true;
+    }
+    if (!interactive) return false;
+    if (s.backendMode === 'drive') {
+        const passphrase = String($('#tavernsync_passphrase').val() || '');
+        if (!passphrase) {
+            toastr.warning('ใส่ Encryption passphrase ก่อน', 'TavernSync');
+            updateE2eeUi();
+            return false;
+        }
+        if (!$('#tavernsync_recovery_ack').prop('checked') && !s.e2eeSalt) {
+            toastr.warning('ยืนยันก่อนว่าคุณบันทึก passphrase ไว้แล้ว', 'TavernSync');
+            return false;
+        }
+        try {
+            return await prepareDriveEncryption(action, passphrase);
+        } catch (error) {
+            console.error(LOG_PREFIX, error);
+            const message = error instanceof Error && error.message === 'Encryption passphrase is incorrect'
+                ? 'Encryption passphrase ไม่ถูกต้อง'
+                : isDriveReconnectRequired(error)
+                    ? 'การเชื่อมต่อ Google หมดอายุ — กด Connect Google แล้วลองใหม่'
+                    : 'เปิดข้อมูลสำรองไม่ได้ — ข้อมูลอาจเสียหายหรือเครือข่ายขัดข้อง ดูรายละเอียดใน Console';
+            toastr.error(message, 'TavernSync');
+            return false;
+        }
     }
     toastr.warning(
         s.e2eeRequireSessionUnlock
@@ -299,38 +385,6 @@ function makeDriveClient(): DriveClient {
     return new DriveClient(driveProvider);
 }
 
-/** popup ให้เลือก root เมื่อเจอหลาย TavernSync folder (MultipleRootsError) */
-async function pickDriveRoot(roots: DriveFileMeta[]): Promise<string | null> {
-    const ctx = getCtx() as SillyTavernContext & {
-        callGenericPopup?: (
-            content: string | HTMLElement,
-            type?: number,
-            inputValue?: string,
-            options?: Record<string, unknown>,
-        ) => Promise<unknown>;
-        POPUP_TYPE?: { TEXT?: number; CONFIRM?: number };
-    };
-    const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    const rows = roots.map((r, i) => {
-        const created = r.createdTime ? new Date(r.createdTime).toLocaleString() : 'unknown date';
-        return `<label><input type="radio" name="ts_drive_root" value="${esc(r.id)}" ${i === 0 ? 'checked' : ''} /> ` +
-            `TavernSync <small>(${esc(created)} · ${esc(r.id.slice(0, 8))}…)</small></label><br/>`;
-    }).join('');
-    const html = `<div class="tavernsync-pick-root"><p><b>พบโฟลเดอร์ TavernSync หลายอันใน Google Drive</b></p>` +
-        `<p>เลือกอันที่ต้องการใช้ซิงก์ (ทุกเครื่องต้องเลือกอันเดียวกัน):</p>${rows}</div>`;
-
-    if (typeof ctx.callGenericPopup === 'function') {
-        const ok = await ctx.callGenericPopup(html, ctx.POPUP_TYPE?.CONFIRM ?? 1);
-        if (!ok) return null;
-        const selected = document.querySelector('input[name="ts_drive_root"]:checked') as HTMLInputElement | null;
-        return selected?.value ?? null;
-    }
-    const list = roots.map((r, i) => `${i + 1}. created ${r.createdTime ?? 'unknown'} (${r.id.slice(0, 8)}…)`).join('\n');
-    const ans = window.prompt(`พบโฟลเดอร์ TavernSync หลายอัน:\n${list}\n\nพิมพ์หมายเลขที่ต้องการใช้`, '1');
-    const idx = Number(ans) - 1;
-    return roots[idx]?.id ?? null;
-}
-
 async function handleDriveConnect(): Promise<void> {
     const s = getSettings();
     if (!s.driveClientId.trim()) {
@@ -348,35 +402,37 @@ async function handleDriveConnect(): Promise<void> {
                 client,
                 currentVersion: s.driveRootVersion,
                 knownRootId: s.driveFolderId,
-                pickLegacyRoot: pickDriveRoot,
+                pickLegacyRoot: async () => null,
             });
             const layout = resolved.layout;
             s.driveRootVersion = resolved.version;
-            console.debug(LOG_PREFIX, `drive connect: layout ready (root=${layout.rootId.slice(0, 8)}…)`);
-            const rootChanged = await prepareDriveRootKeyTransition(
-                s.driveFolderId,
-                layout.rootId,
-                () => lockE2ee({ forgetDevice: true }),
-            );
-            s.driveFolderId = layout.rootId;
-            // salt ของบัญชี derive จาก folderId (deterministic ทุกเครื่อง) — unlockE2ee ใช้ค่านี้ต่อได้เลย
-            s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(layout.rootId));
-            saveSettings();
-            if (rootChanged) {
-                console.info(LOG_PREFIX, 'Drive Root changed; invalidated the previous Root E2EE key');
+            if (!layout) {
+                const rootChanged = await prepareDriveRootKeyTransition(
+                    s.driveFolderId,
+                    '',
+                    () => lockE2ee({ forgetDevice: true }),
+                );
+                s.driveFolderId = '';
+                s.e2eeSalt = '';
+                saveSettings();
+                if (rootChanged) {
+                    console.info(LOG_PREFIX, 'Remembered Google Drive storage is no longer available');
+                }
+                const q = await client.getQuota();
+                $('#tavernsync_quota_line').text(
+                    `Google Drive: ${formatBytes(q.usedBytes)} / ${formatBytes(q.limitBytes)} · Enter passphrase, then Push or Pull`,
+                );
+                return;
             }
+            console.debug(LOG_PREFIX, `drive connect: remembered storage ready (root=${layout.rootId.slice(0, 8)}…)`);
+            await adoptDriveStorage(layout);
             const q = await client.getQuota();
             const files = await client.listChildren('packsId' in layout ? layout.packsId : layout.blobsId);
             $('#tavernsync_quota_line').text(
-                `Google Drive: ${formatBytes(q.usedBytes)} / ${formatBytes(q.limitBytes)} · TavernSync ${files.length} ${s.driveRootVersion === 2 ? 'packs' : 'files'}`,
+                `Google Drive: ${formatBytes(q.usedBytes)} / ${formatBytes(q.limitBytes)} · Backup storage contains ${files.length} data files`,
             );
         });
-        toastr.success(
-            s.driveRootVersion === 2
-                ? 'Connected to Drive v2 — ปลดล็อกแล้วใช้ Push, Pull หรือ Check status ได้เลย'
-                : 'Connected to Google Drive — ปลดล็อก passphrase แล้ว Push/Pull ได้เลย',
-            'TavernSync',
-        );
+        toastr.success('Connected to Google Drive — ใส่ passphrase แล้วใช้ Push หรือ Pull ได้เลย', 'TavernSync');
         updateDriveStatus();
         updateBackendFieldsVisibility();
         updateE2eeUi();
@@ -423,7 +479,7 @@ async function handleDriveGc(): Promise<void> {
             const result = await collectGarbage(client, rt.storage as DriveAdapter, layout, rt.crypto);
             return { trashedPacks: result.trashedBlobs, trashedCommits: result.trashedCommits };
         });
-        toastr.success(`Clean up เสร็จ — trash ${res.trashedPacks} packs/blobs + ${res.trashedCommits} commits`, 'TavernSync');
+        toastr.success(`Clean up เสร็จ — ย้ายข้อมูลสำรองเก่า ${res.trashedPacks + res.trashedCommits} รายการลงถังขยะ`, 'TavernSync');
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Clean up failed: ${String(e)}`, 'TavernSync');
@@ -473,9 +529,9 @@ function bindDrawerQuietScan(): void {
 
 async function handleStatus(): Promise<void> {
     if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
-        if (!(await ensureE2eeReady())) return;
+        if (!(await ensureE2eeReady('status'))) return;
         try {
-            const status = await withLoader('Checking Drive snapshots…', () =>
+            const status = await withLoader('Checking Google Drive backup…', () =>
                 getDriveV2Status((message) => setStatusLine(message)),
             );
             const s = getSettings();
@@ -494,7 +550,7 @@ async function handleStatus(): Promise<void> {
                 ? status.heads.map(head => `${head.device} (${head.itemCount} items)`).join(', ')
                 : 'none';
             toastr.info(
-                `${status.itemCount} local items · Drive snapshots: ${driveHeads}`,
+                `${status.itemCount} local items · Google Drive backups: ${driveHeads}`,
                 'TavernSync status',
             );
         } catch (e) {
@@ -526,7 +582,7 @@ async function handleStatus(): Promise<void> {
 }
 
 async function handlePush(): Promise<void> {
-    if (!(await ensureE2eeReady())) return;
+    if (!(await ensureE2eeReady('push'))) return;
     try {
         const { message } = await withLoader('Pushing…', () =>
             runSync({
@@ -543,7 +599,7 @@ async function handlePush(): Promise<void> {
         console.error(LOG_PREFIX, e);
         if (e instanceof DriveUploadPausedError) {
             $('#tavernsync_resume_drive_v2_push').show();
-            setStatusLine(`Google login required · pack paused at ${formatBytes(e.acknowledgedBytes)}`);
+            setStatusLine(`Google login required · upload paused at ${formatBytes(e.acknowledgedBytes)}`);
             toastr.warning('Google token หมด — กด Connect & Resume เพื่อส่งต่อจากตำแหน่งเดิม', 'TavernSync');
             return;
         }
@@ -552,7 +608,7 @@ async function handlePush(): Promise<void> {
 }
 
 async function handlePull(): Promise<void> {
-    if (!(await ensureE2eeReady())) return;
+    if (!(await ensureE2eeReady('pull'))) return;
     const execute = () => withLoader('Pulling…', () =>
         runSync({
             direction: 'pull',
@@ -566,7 +622,7 @@ async function handlePull(): Promise<void> {
         setStatusLine(message);
         toastr.success(message, 'TavernSync pull');
         if (message.startsWith('Fast Pull complete') && window.confirm(
-            'Fast Pull restored the complete Drive snapshot.\n\nReload now so SillyTavern reads every updated item?',
+            'Fast Pull restored the complete Google Drive backup.\n\nReload now so SillyTavern reads every updated item?',
         )) {
             location.reload();
         }
@@ -586,7 +642,7 @@ async function handlePull(): Promise<void> {
 async function handleResetDriveV2(): Promise<void> {
     const s = getSettings();
     if (s.backendMode !== 'drive' || !s.driveClientId.trim() || !s.driveFolderId.trim()) {
-        toastr.warning('Connect Google กับ Root ปัจจุบันก่อนสร้าง Drive v2 Root', 'TavernSync');
+        toastr.warning('Connect Google กับที่เก็บข้อมูลปัจจุบันก่อนเริ่มใหม่', 'TavernSync');
         return;
     }
     const phrase = 'RESET DRIVE V2';
@@ -597,7 +653,7 @@ async function handleResetDriveV2(): Promise<void> {
     if (!canResetDriveV2(typed, phrase)) return;
 
     try {
-        await withLoader('Creating fresh Drive v2 root…', async () => {
+        await withLoader('Preparing new Google Drive storage…', async () => {
             const client = makeDriveClient();
             await getSharedGisTokenProvider(s.driveClientId.trim()).getTokenInteractive();
             await lockE2ee({ forgetDevice: true });
@@ -611,7 +667,7 @@ async function handleResetDriveV2(): Promise<void> {
             s.driveFolderId = layout.rootId;
             s.driveRootVersion = 2;
             s.e2eeSalt = encodeSalt(await driveSaltFromFolderIdAsync(layout.rootId));
-            s.lastStatusMessage = 'Drive v2 Root ready — unlock then Full Push';
+            s.lastStatusMessage = 'New storage ready — unlock then Push';
             s.lastItemCount = 0;
             saveSettings();
         });
@@ -619,10 +675,10 @@ async function handleResetDriveV2(): Promise<void> {
         setStatusLine(s.lastStatusMessage);
         updateBackendFieldsVisibility();
         updateE2eeUi();
-        toastr.success('Drive v2 Root ว่างพร้อมแล้ว — ปลดล็อก แล้วกด Push จาก PC เครื่องนี้', 'TavernSync');
+        toastr.success('ที่เก็บใหม่พร้อมแล้ว — ปลดล็อก แล้วกด Push จากเครื่องนี้', 'TavernSync');
     } catch (e) {
         console.error(LOG_PREFIX, e);
-        toastr.error(`Drive v2 reset failed: ${String(e)}`, 'TavernSync');
+        toastr.error(`Could not start fresh storage: ${String(e)}`, 'TavernSync');
     }
 }
 
@@ -630,7 +686,7 @@ async function handleResumeDriveV2Push(): Promise<void> {
     const s = getSettings();
     try {
         await getSharedGisTokenProvider(s.driveClientId.trim()).getTokenInteractive();
-        const { message } = await withLoader('Resuming Drive v2 Full Push…', () =>
+        const { message } = await withLoader('Resuming Google Drive upload…', () =>
             resumeDriveV2FullPushFromEngine(),
         );
         $('#tavernsync_resume_drive_v2_push').hide();
@@ -657,9 +713,13 @@ async function handleUnlockE2ee(): Promise<void> {
         return;
     }
     try {
-        await unlockE2ee(passphrase);
-        $('#tavernsync_passphrase').val('');
-        updateE2eeUi();
+        if (getSettings().backendMode === 'drive') {
+            if (!(await ensureE2eeReady('unlock'))) return;
+        } else {
+            await unlockE2ee(passphrase);
+            $('#tavernsync_passphrase').val('');
+            updateE2eeUi();
+        }
         const s = getSettings();
         toastr.success(
             s.e2eeRequireSessionUnlock
@@ -888,7 +948,7 @@ function registerEventListeners(): void {
             setTimeout(() => {
                 void (async () => {
                     try {
-                        if (!(await ensureE2eeReady())) return;
+                        if (!(await ensureE2eeReady('pull', false))) return;
                         await runSync({ direction: 'pull', onProgress: (m) => setStatusLine(m) });
                         toastr.info('Auto-pull on startup finished.', 'TavernSync');
                     } catch (e) {
@@ -927,7 +987,7 @@ function registerEventListeners(): void {
             setTimeout(() => {
                 void (async () => {
                     try {
-                        if (!(await ensureE2eeReady())) return;
+                        if (!(await ensureE2eeReady('push', false))) return;
                         await runSync({
                             direction: 'push',
                             onProgress: (m) => setStatusLine(m),

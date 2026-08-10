@@ -23,6 +23,15 @@ const harness = vi.hoisted(() => ({
         elapsedMs: 40,
     })),
     wipeDriveV2RemoteSnapshot: vi.fn(async () => ({ commitId: 'empty-head' })),
+    saveSettingsDebounced: vi.fn(),
+    savedSettings: null as Record<string, unknown> | null,
+    serverSettings: {
+        world_info_settings: { world_info: { globalSelect: ['Lore A'] } },
+        extension_settings: {
+            tavernsync: { deviceName: 'phone', driveFolderId: 'root' },
+            anotherExtension: { enabled: true },
+        },
+    } as Record<string, unknown>,
     runDriveV2Sync: vi.fn(async (options: {
         direction: string;
         runPull: (commit: unknown, manifest: unknown) => Promise<unknown>;
@@ -91,6 +100,19 @@ vi.mock('../../st-adapter/inventory', () => ({
     listLocalInventory: harness.listLocalInventory,
 }));
 
+vi.mock('../../st-adapter/http', () => ({
+    stFetchJson: vi.fn(async (path: string, body: unknown) => {
+        if (path === '/api/settings/get') {
+            return { settings: JSON.stringify(harness.serverSettings) };
+        }
+        if (path === '/api/settings/save') {
+            harness.savedSettings = body as Record<string, unknown>;
+            return { ok: true };
+        }
+        throw new Error(`unexpected ST endpoint: ${path}`);
+    }),
+}));
+
 vi.mock('../drive/drive-v2-pull', async importOriginal => {
     const original = await importOriginal<typeof import('../drive/drive-v2-pull')>();
     return { ...original, runDriveV2Pull: harness.adaptivePull };
@@ -113,6 +135,8 @@ beforeEach(async () => {
     harness.listLocalInventory.mockClear();
     harness.adaptivePull.mockClear();
     harness.wipeDriveV2RemoteSnapshot.mockClear();
+    harness.saveSettingsDebounced.mockClear();
+    harness.savedSettings = null;
     (globalThis as unknown as { SillyTavern: unknown }).SillyTavern = {
         libs: {
             localforage: {
@@ -135,10 +159,11 @@ beforeEach(async () => {
                     scope: { settings: true },
                 },
             },
-            saveSettingsDebounced: () => undefined,
+            saveSettingsDebounced: harness.saveSettingsDebounced,
         }),
     };
     await unlockE2ee('passphrase');
+    harness.saveSettingsDebounced.mockClear();
 });
 
 describe('Drive v2 engine routing', () => {
@@ -150,14 +175,51 @@ describe('Drive v2 engine routing', () => {
         expect(harness.directions).toContain(direction);
     });
 
-    it('routes Drive v2 Pull to extension-only restore before full browser scan', async () => {
+    it('scans local hashes before Drive v2 Pull so unchanged items can be skipped', async () => {
         await runSync({ direction: 'pull' });
 
-        expect(harness.scanLocal).not.toHaveBeenCalled();
-        expect(harness.listLocalInventory).toHaveBeenCalledOnce();
+        expect(harness.scanLocal).toHaveBeenCalledOnce();
         expect(harness.adaptivePull).toHaveBeenCalledWith(expect.objectContaining({
             commit: expect.objectContaining({ commitId: 'head-a' }),
+            localHashes: expect.any(Map),
         }));
+    });
+
+    it('includes semantic companion items for every selected scope', async () => {
+        await runSync({ direction: 'pull' });
+
+        const calls = harness.adaptivePull.mock.calls as unknown as Array<[
+            { allowedTypes: Set<string> },
+        ]>;
+        const options = calls[0][0];
+        expect([...options.allowedTypes]).toEqual(expect.arrayContaining([
+            'settings',
+            'extension',
+            'character',
+            'characterstate',
+            'characterasset',
+            'group',
+            'groupchat',
+            'userimage',
+        ]));
+    });
+
+    it('persists Pull status onto the latest restored settings instead of saving stale page state', async () => {
+        await runSync({ direction: 'pull' });
+
+        expect(harness.saveSettingsDebounced).not.toHaveBeenCalled();
+        expect(harness.savedSettings).toMatchObject({
+            world_info_settings: { world_info: { globalSelect: ['Lore A'] } },
+            extension_settings: {
+                anotherExtension: { enabled: true },
+                tavernsync: expect.objectContaining({
+                    deviceName: 'phone',
+                    driveFolderId: 'root',
+                    lastItemCount: 0,
+                    lastStatusMessage: 'Fast Pull complete · 0s',
+                }),
+            },
+        });
     });
 
     it('contains no Core restore or restore-session imports', () => {

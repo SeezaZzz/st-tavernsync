@@ -42,6 +42,34 @@ describe('extension-only adaptive Pull integration', () => {
         expect(h.checkpointState).toBeNull();
     });
 
+    it('downloads a 30-pack snapshot with exactly 30 successful media requests', async () => {
+        const ids = Array.from({ length: 2_347 }, (_, index) => `preset/${index}`);
+        const h = await createAdaptivePullHarness({
+            remote: ids,
+            packCount: 30,
+        });
+
+        const result = await runDriveV2Pull(h.options);
+
+        expect(h.inventory()).toEqual(h.remoteInventory());
+        expect(h.packReads).toBe(30);
+        expect(result.downloadedPacks).toBe(30);
+        expect(result.packDownloadRequests).toBe(30);
+    });
+
+    it('downloads interleaved items once per pack with a two-pack RAM cache', async () => {
+        const ids = Array.from({ length: 90 }, (_, index) => `preset/${index}`);
+        const packNames = ids.map((_, index) => `pack-${index % 3}`);
+        const h = await createAdaptivePullHarness({ remote: ids, packNames });
+
+        const result = await runDriveV2Pull(h.options);
+
+        expect(h.inventory()).toEqual(h.remoteInventory());
+        expect(h.packReads).toBe(3);
+        expect(result.packDownloadRequests).toBe(3);
+        expect(result.peakEncryptedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+    });
+
     it('reports five-run adaptive Pull benchmark evidence', async () => {
         const runs: Array<{
             elapsedMs: number;
