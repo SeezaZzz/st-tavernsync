@@ -201,9 +201,12 @@ export async function applyLocalItem(
             await writePersona(raw);
             break;
         }
-        case 'theme':
+        case 'theme': {
+            await stFetchJson('/api/themes/save', decodeUtf8Json(bytes));
+            break;
+        }
         case 'quickreply': {
-            console.warn(LOG_PREFIX, `Apply for ${type} not fully wired; skipping ${id}`);
+            await stFetchJson('/api/quick-replies/save', decodeUtf8Json(bytes));
             break;
         }
         default:
