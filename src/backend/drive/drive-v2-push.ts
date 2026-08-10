@@ -6,6 +6,7 @@ import type { PackUploadControl } from './pack-uploader';
 import { DriveUploadPausedError } from './pack-uploader';
 import { formatDriveV2PushProgress } from './drive-v2-ui-state';
 import type { DriveV2CommitMeta } from './drive-v2-head';
+import type { DriveFileMeta } from './client';
 import {
     DRIVE_V2_CHUNK_BYTES,
     DRIVE_V2_CONCURRENCY,
@@ -28,6 +29,7 @@ export interface DriveV2ReadStore {
     listCommits(): Promise<DriveV2CommitMeta[]>;
     readManifest(commit: DriveV2CommitMeta): Promise<DrivePackManifestV2>;
     readPack(name: string): Promise<Uint8Array>;
+    listPacks(): Promise<Map<string, DriveFileMeta>>;
 }
 
 export interface DriveV2Runtime {
@@ -128,8 +130,7 @@ class BoundedPackUploadQueue {
         this.firstUploadAt ??= this.now();
         let succeeded = false;
 
-        let task!: Promise<void>;
-        task = this.store.putPack(pack, {
+        const task = this.store.putPack(pack, {
             signal: this.signal,
             resume: this.resumeSessions?.get(pack.name),
             onRetry: () => { this.retryCount += 1; },

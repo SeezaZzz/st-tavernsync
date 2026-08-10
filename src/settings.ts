@@ -22,6 +22,12 @@ export interface SyncScopeSettings {
     themes: boolean;
 }
 
+export interface DriveV2PullCheckpointState {
+    commitId: string;
+    completedItemIds: string[];
+    updatedAt: number;
+}
+
 export interface TavernSyncSettings {
     backendMode: BackendMode;
     endpoint: string;
@@ -45,6 +51,8 @@ export interface TavernSyncSettings {
     driveFolderId: string;
     /** Drive storage schema for the remembered Root. Existing installs backfill to v1. */
     driveRootVersion: 1 | 2;
+    /** Resume state for an interrupted extension-only Drive v2 Pull. */
+    driveV2PullCheckpoint: DriveV2PullCheckpointState | null;
     lastStatusMessage: string;
     lastItemCount: number;
 }
@@ -74,6 +82,7 @@ export const defaultSettings: Readonly<TavernSyncSettings> = Object.freeze({
     driveClientId: '',
     driveFolderId: '',
     driveRootVersion: 1,
+    driveV2PullCheckpoint: null,
     lastStatusMessage: 'Not set up yet',
     lastItemCount: 0,
 });
@@ -134,6 +143,17 @@ export function getSettings(): TavernSyncSettings {
     if (typeof settings.driveClientId !== 'string') settings.driveClientId = '';
     if (typeof settings.driveFolderId !== 'string') settings.driveFolderId = '';
     if (settings.driveRootVersion !== 1 && settings.driveRootVersion !== 2) settings.driveRootVersion = 1;
+    if (settings.driveV2PullCheckpoint !== null) {
+        const checkpoint = settings.driveV2PullCheckpoint;
+        if (!isPlainObject(checkpoint)
+            || typeof checkpoint.commitId !== 'string'
+            || !Array.isArray(checkpoint.completedItemIds)
+            || !checkpoint.completedItemIds.every(value => typeof value === 'string')
+            || typeof checkpoint.updatedAt !== 'number'
+            || !Number.isFinite(checkpoint.updatedAt)) {
+            settings.driveV2PullCheckpoint = null;
+        }
+    }
     if (typeof settings.lastItemCount !== 'number') settings.lastItemCount = 0;
 
     settings.autoSyncOnStartup = !!settings.autoSyncOnStartup;

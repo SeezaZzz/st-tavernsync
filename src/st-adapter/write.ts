@@ -3,7 +3,11 @@
 import { LOG_PREFIX } from '../settings';
 import type { ItemType } from '../sync-core/types';
 import { stFetchForm, stFetchJson } from './http';
+import { decodeCharacterAssetId } from './character-assets';
+import { writeCharacterState } from './character-state';
 import { base64ToUint8, type PersonaPayload } from './read';
+import { writeUserImage } from './user-images';
+import { installExtension, type ExtensionDescriptor } from './extension-state';
 
 function bytesToBlobPart(bytes: Uint8Array): BlobPart {
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -46,13 +50,35 @@ export async function writeSettings(settings: Record<string, unknown>): Promise<
 export async function importCharacterPng(pngBytes: Uint8Array, preservedName?: string): Promise<string> {
     const form = new FormData();
     const blob = new Blob([bytesToBlobPart(pngBytes)], { type: 'image/png' });
-    form.append('avatar', blob, preservedName ? `${preservedName}.png` : 'character.png');
+    const filename = preservedName
+        ? (preservedName.endsWith('.png') ? preservedName : `${preservedName}.png`)
+        : 'character.png';
+    form.append('avatar', blob, filename);
     form.append('file_type', 'png');
     if (preservedName) {
-        form.append('preserved_name', preservedName.replace(/\.png$/i, ''));
+        form.append('preserved_name', filename);
     }
     const res = await stFetchForm<{ file_name: string }>('/api/characters/import', form);
     return `${res.file_name}.png`;
+}
+
+export async function writeCharacterAsset(
+    id: string,
+    bytes: Uint8Array,
+): Promise<void> {
+    const { characterName, relativePath } = decodeCharacterAssetId(id);
+    const pathParts = relativePath.split('/');
+    const filename = pathParts.pop();
+    if (!filename) throw new Error(`Character asset is missing a filename: ${id}`);
+    const spriteName = filename.replace(/\.[^.]+$/, '');
+    const folder = [characterName, ...pathParts].join('/');
+    const form = new FormData();
+    const blob = new Blob([bytesToBlobPart(bytes)], { type: 'application/octet-stream' });
+    form.append('name', folder);
+    form.append('label', spriteName);
+    form.append('avatar', blob, filename);
+    form.append('spriteName', spriteName);
+    await stFetchForm('/api/sprites/upload', form);
 }
 
 export async function uploadPersonaAvatar(imageBytes: Uint8Array, avatarId: string): Promise<string> {
@@ -65,21 +91,31 @@ export async function uploadPersonaAvatar(imageBytes: Uint8Array, avatarId: stri
     return res.path || filename;
 }
 
-/** Merge persona name + description into settings.json and optionally upload avatar image. */
-export async function writePersona(payload: PersonaPayload): Promise<void> {
-    const avatarId = payload.avatarId;
-    if (!avatarId) throw new Error('Persona payload missing avatarId');
+export interface PreparedPersona {
+    avatarId: string;
+    key: string;
+    name: string;
+    description: PersonaPayload['description'];
+}
 
-    let key = avatarId;
-    if (payload.imageBase64) {
-        key = await uploadPersonaAvatar(base64ToUint8(payload.imageBase64), avatarId);
-    }
+export async function preparePersona(payload: PersonaPayload): Promise<PreparedPersona> {
+    if (!payload.avatarId) throw new Error('Persona payload missing avatarId');
+    const key = payload.imageBase64
+        ? await uploadPersonaAvatar(base64ToUint8(payload.imageBase64), payload.avatarId)
+        : payload.avatarId;
+    return {
+        avatarId: payload.avatarId,
+        key,
+        name: payload.name || key,
+        description: payload.description,
+    };
+}
 
+export async function applyPreparedPersonas(prepared: readonly PreparedPersona[]): Promise<void> {
+    if (!prepared.length) return;
     const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
     const full = JSON.parse(raw.settings || '{}') as Record<string, unknown>;
-    if (!full.power_user || typeof full.power_user !== 'object') {
-        full.power_user = {};
-    }
+    if (!full.power_user || typeof full.power_user !== 'object') full.power_user = {};
     const power = full.power_user as Record<string, unknown>;
     const personas = (power.personas && typeof power.personas === 'object'
         ? power.personas
@@ -88,11 +124,9 @@ export async function writePersona(payload: PersonaPayload): Promise<void> {
         ? power.persona_descriptions
         : {}) as Record<string, Record<string, unknown>>;
 
-    personas[key] = payload.name || key;
-    if (payload.description) {
-        descriptions[key] = payload.description;
-    } else if (!descriptions[key]) {
-        descriptions[key] = {
+    for (const persona of prepared) {
+        personas[persona.key] = persona.name;
+        descriptions[persona.key] = persona.description ?? descriptions[persona.key] ?? {
             description: '',
             position: 0,
             depth: 2,
@@ -100,17 +134,20 @@ export async function writePersona(payload: PersonaPayload): Promise<void> {
             lorebook: '',
             title: '',
         };
-    }
-
-    // If upload renamed the file, drop stale key from an older avatarId
-    if (key !== avatarId) {
-        delete personas[avatarId];
-        delete descriptions[avatarId];
+        if (persona.key !== persona.avatarId) {
+            delete personas[persona.avatarId];
+            delete descriptions[persona.avatarId];
+        }
     }
 
     power.personas = personas;
     power.persona_descriptions = descriptions;
     await writeSettings(full);
+}
+
+/** Merge persona name + description into settings.json and optionally upload avatar image. */
+export async function writePersona(payload: PersonaPayload): Promise<void> {
+    await applyPreparedPersonas([await preparePersona(payload)]);
 }
 
 export function parseItemId(id: string): { type: ItemType; parts: string[] } {
@@ -174,10 +211,22 @@ export async function applyLocalItem(
             await writeGroup(group);
             break;
         }
+        case 'userimage': {
+            await writeUserImage(parts.join('/'), bytes);
+            break;
+        }
         case 'character': {
             const avatar = parts.join('/');
-            const preserved = avatar.replace(/\.png$/i, '');
-            await importCharacterPng(bytes, preserved);
+            await importCharacterPng(bytes, avatar);
+            break;
+        }
+        case 'characterstate': {
+            const avatar = parts.join('/');
+            await writeCharacterState(avatar, decodeUtf8Json(bytes) as { fav: boolean });
+            break;
+        }
+        case 'characterasset': {
+            await writeCharacterAsset(id, bytes);
             break;
         }
         case 'settings': {
@@ -201,9 +250,16 @@ export async function applyLocalItem(
             await writePersona(raw);
             break;
         }
-        case 'theme':
+        case 'theme': {
+            await stFetchJson('/api/themes/save', decodeUtf8Json(bytes));
+            break;
+        }
+        case 'extension': {
+            await installExtension(decodeUtf8Json(bytes) as ExtensionDescriptor);
+            break;
+        }
         case 'quickreply': {
-            console.warn(LOG_PREFIX, `Apply for ${type} not fully wired; skipping ${id}`);
+            await stFetchJson('/api/quick-replies/save', decodeUtf8Json(bytes));
             break;
         }
         default:

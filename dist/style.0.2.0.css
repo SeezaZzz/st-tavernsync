@@ -33,3 +33,12 @@
     margin: 0.5em 0;
 }
 
+.tavernsync-settings .tavernsync-maintenance-button {
+    box-sizing: border-box;
+    width: min(100%, 16rem);
+}
+
+body:has(.popup[open] .tavernsync-drive-v2-choice) #toast-container {
+    visibility: hidden;
+}
+

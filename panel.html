@@ -63,16 +63,11 @@
                 <small id="tavernsync_drive_status" class="tavernsync-hint">● ยังไม่ได้เชื่อมต่อ Google</small>
                 <small>E2EE ถูกบังคับเปิดสำหรับ backend นี้ — ข้อมูลทุกไบต์เข้ารหัสก่อนถึง Google</small>
                 <div class="tavernsync_row">
-                    <div id="tavernsync_reset_drive_v2" class="menu_button" style="display:none" title="Create an empty encrypted-pack Root and move the current TavernSync Root to Drive trash">
-                        Reset to empty Drive v2 Root
-                    </div>
                     <div id="tavernsync_resume_drive_v2_push" class="menu_button" style="display:none">
                         Connect &amp; Resume
                     </div>
                 </div>
-                <small class="tavernsync-hint">Drive v2 ใช้ snapshot เข้ารหัสทั้งชุด การ reset ไม่ลบข้อมูล SillyTavern บน PC</small>
             </div>
-            <div id="tavernsync_gc" class="menu_button" style="display:none">Clean up old data (Drive)</div>
 
             <div id="tavernsync_quota_line" class="tavernsync-hint">Storage: —</div>
 
@@ -187,6 +182,7 @@
                         </div>
                         <small class="tavernsync-hint">
                             Write it down somewhere safe. If you lose it, encrypted sync data cannot be recovered.
+                            Unreadable ciphertext remains in Google Drive, including Drive Trash, until you delete it permanently.
                         </small>
                         <label class="checkbox_label" for="tavernsync_recovery_ack">
                             <input id="tavernsync_recovery_ack" type="checkbox" />
@@ -214,22 +210,35 @@
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
                 <div class="inline-drawer-content">
+                    <div id="tavernsync_drive_maintenance" style="display:none">
+                        <div class="flex-container flexGap5 flexWrap">
+                            <div id="tavernsync_reset_drive_v2" class="menu_button tavernsync-maintenance-button" title="Move the current TavernSync storage to Drive trash and start fresh">
+                                Start fresh Google Drive storage
+                            </div>
+                            <div id="tavernsync_gc" class="menu_button tavernsync-maintenance-button">
+                                Clean up old data (Drive)
+                            </div>
+                        </div>
+                        <small class="tavernsync-hint">
+                            การเริ่มใหม่หรือ cleanup ไม่ลบข้อมูล SillyTavern ในเครื่อง
+                        </small>
+                    </div>
                     <div class="flex-container flexGap5 flexWrap">
-                        <div id="tavernsync_rebuild_index" class="menu_button menu_button_icon" title="Rescan local SillyTavern data">
+                        <div id="tavernsync_rebuild_index" class="menu_button menu_button_icon tavernsync-maintenance-button" title="Rescan local SillyTavern data">
                             Rescan this device
                         </div>
-                        <div id="tavernsync_view_log" class="menu_button menu_button_icon">
+                        <div id="tavernsync_view_log" class="menu_button menu_button_icon tavernsync-maintenance-button">
                             Show logs in console
                         </div>
-                        <div id="tavernsync_reset_state" class="menu_button menu_button_icon">
+                        <div id="tavernsync_reset_state" class="menu_button menu_button_icon tavernsync-maintenance-button">
                             Reset sync on this device
                         </div>
-                        <div id="tavernsync_wipe_remote" class="menu_button menu_button_icon" title="Clears the server sync index, not your local SillyTavern files">
-                            Wipe server sync data
+                        <div id="tavernsync_wipe_remote" class="menu_button menu_button_icon tavernsync-maintenance-button" title="Clears remote sync data, not your local SillyTavern files">
+                            Wipe remote sync data
                         </div>
                     </div>
                     <small class="tavernsync-hint">
-                        Rescan only when something looks out of date. If Pull says files are missing, wipe the server index, then Push from the device that has the good copy.
+                        Rescan only when something looks out of date. If Pull says files are missing, wipe remote sync data, then Push from the device that has the good copy.
                     </small>
                 </div>
             </div>

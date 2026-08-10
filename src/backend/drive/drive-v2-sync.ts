@@ -5,7 +5,11 @@ import {
     buildDriveV2SnapshotPreview,
     type DriveV2ChoiceInput,
 } from './drive-v2-choice';
-import { computeDriveV2Heads, type DriveV2CommitMeta } from './drive-v2-head';
+import {
+    computeDriveV2Heads,
+    selectNewestDriveV2Head,
+    type DriveV2CommitMeta,
+} from './drive-v2-head';
 import type { DriveV2PullResult } from './drive-v2-pull';
 import type { DriveV2PushResult, DriveV2Runtime } from './drive-v2-push';
 import type { DrivePackManifestV2 } from './pack-types';
@@ -62,9 +66,7 @@ export async function runDriveV2Sync(options: DriveV2SyncOptions): Promise<Drive
     }
 
     if (options.direction === 'pull') {
-        const newestHead = [...heads].sort((a, b) =>
-            b.createdTime.localeCompare(a.createdTime)
-            || b.commitId.localeCompare(a.commitId))[0];
+        const newestHead = selectNewestDriveV2Head(heads);
         const manifest = await store.readManifest(newestHead);
         return { kind: 'pulled', result: await options.runPull(newestHead, manifest) };
     }

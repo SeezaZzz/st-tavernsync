@@ -7,24 +7,35 @@ import { requireDriveV2Runtime, requireRuntime, type BackendRuntime } from '../b
 import {
     createDriveV2PushController,
     driveV2ControllerResult,
+    type DriveV2Runtime,
     type DriveV2PushController,
     type DriveV2PushResult,
 } from '../backend/drive/drive-v2-push';
-import { DriveV2PackReader } from '../backend/drive/pack-reader';
-import {
-    runDriveV2Pull,
-    type DriveV2PullStage,
-} from '../backend/drive/drive-v2-pull';
+import { wipeDriveV2RemoteSnapshot } from '../backend/drive/drive-v2-wipe';
+import { runDriveV2Pull, type DriveV2PullResult } from '../backend/drive/drive-v2-pull';
 import {
     runDriveV2Sync,
     type DriveV2SourceChoice,
 } from '../backend/drive/drive-v2-sync';
-import { computeDriveV2Heads } from '../backend/drive/drive-v2-head';
+import { computeDriveV2Heads, type DriveV2CommitMeta } from '../backend/drive/drive-v2-head';
+import type { DrivePackManifestV2 } from '../backend/drive/pack-types';
+import { DriveV2PullCheckpoint } from '../backend/drive/pull-checkpoint';
+import { formatDriveV2PullProgress } from '../backend/drive/drive-v2-ui-state';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
 import { loadBlob, loadLocalManifest, scanLocal, storeBlob } from '../st-adapter/scan';
-import { applyLocalItem, decodeUtf8Jsonl, parseItemId, writeChat } from '../st-adapter/write';
+import { listLocalInventory } from '../st-adapter/inventory';
+import {
+    applyLocalItem,
+    applyPreparedPersonas,
+    decodeUtf8Jsonl,
+    parseItemId,
+    preparePersona,
+    writeChat,
+    type PreparedPersona,
+} from '../st-adapter/write';
+import type { PersonaPayload } from '../st-adapter/read';
 import { deleteLocalItem } from '../st-adapter/delete';
 import { stFetchJson } from '../st-adapter/http';
 import { conflictSiblingId, tryChatFastForward } from '../sync-core/conflict';
@@ -38,13 +49,10 @@ import { emptyManifest } from '../sync-core/types';
 import {
     LEGACY_BASE_KEY,
     baseStorageKey,
-    clearDriveV2PullJournal,
     e2eeKeyStorageKey,
     getSyncStore,
     loadDriveV2Base,
-    markDriveV2PullItemCompleted,
     saveDriveV2Base,
-    startDriveV2PullJournal,
 } from '../state/store';
 import { createPushHandlers } from './push-batch';
 import { PullCrashJournal, type PullCrashUpdate, type PullStage } from './pull-crash-journal';
@@ -146,6 +154,23 @@ export async function clearBase(): Promise<void> {
 
 export async function wipeRemoteSyncData(): Promise<void> {
     const s = getSettings();
+    if (s.backendMode === 'drive' && s.driveRootVersion === 2) {
+        const runtime = await requireDriveV2Runtime();
+        currentNamespace = `drive:${runtime.layout.rootId}`;
+        const { commitId } = await wipeDriveV2RemoteSnapshot(
+            runtime.store,
+            s.deviceName || 'device',
+        );
+        await saveDriveV2Base(currentNamespace, {
+            commitId,
+            syncedAt: Date.now(),
+        });
+        s.lastStatusMessage = 'Remote wiped';
+        s.lastItemCount = 0;
+        saveSettings();
+        console.log(LOG_PREFIX, 'Google Drive backup wiped', { commitId });
+        return;
+    }
     const rt = await requireRuntime();
     currentNamespace = rt.storageNamespace;
     const adapter = rt.storage;
@@ -357,7 +382,15 @@ function scopeTypeSet(scope: SyncScopeSettings): Set<SyncItem['type']> {
     for (const [setting, type] of mappings) {
         if (scope[setting]) {
             set.add(type);
-            if (setting === 'groups') set.add('groupchat');
+            if (setting === 'settings') set.add('extension');
+            if (setting === 'characters') {
+                set.add('characterstate');
+                set.add('characterasset');
+            }
+            if (setting === 'groups') {
+                set.add('groupchat');
+                set.add('userimage');
+            }
         }
     }
     return set;
@@ -453,19 +486,39 @@ export function mergePulledSettings(
         };
     }
 
-    if (!merged.extensionSettings || typeof merged.extensionSettings !== 'object') {
-        merged.extensionSettings = {};
-    }
-    const liveExt = isPlainObject(live.extensionSettings) ? live.extensionSettings : {};
-    const pulledExt = isPlainObject(pulled.extensionSettings) ? pulled.extensionSettings : {};
+    const liveExt = isPlainObject(live.extension_settings) ? live.extension_settings : {};
+    const pulledExt = isPlainObject(pulled.extension_settings) ? pulled.extension_settings : {};
     const mergedExt = {
         ...liveExt,
         ...pulledExt,
         tavernsync: liveExt.tavernsync ?? getSettings(),
     };
-    merged.extensionSettings = mergedExt;
+    merged.extension_settings = mergedExt;
+    delete merged.extensionSettings;
 
     return merged;
+}
+
+async function persistFastPullStatus(lastStatusMessage: string, lastItemCount: number): Promise<void> {
+    const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
+    const latestValue: unknown = JSON.parse(raw.settings || '{}');
+    const latest = isPlainObject(latestValue) ? latestValue : {};
+    const extensionSettings = isPlainObject(latest.extension_settings)
+        ? latest.extension_settings
+        : {};
+    const latestTavernSync = isPlainObject(extensionSettings.tavernsync)
+        ? extensionSettings.tavernsync
+        : structuredClone(getSettings()) as unknown as Record<string, unknown>;
+
+    latest.extension_settings = {
+        ...extensionSettings,
+        tavernsync: {
+            ...latestTavernSync,
+            lastStatusMessage,
+            lastItemCount,
+        },
+    };
+    await stFetchJson('/api/settings/save', latest);
 }
 
 async function resolveChatConflict(
@@ -474,7 +527,7 @@ async function resolveChatConflict(
     remoteHash: string,
     rt: BackendRuntime,
 ): Promise<'local' | 'remote' | 'both' | 'fast_forward_local' | 'fast_forward_remote'> {
-    let localBytes = await loadBlob(localHash);
+    const localBytes = await loadBlob(localHash);
     if (!localBytes || localBytes.byteLength === 0) {
         // re-scan needed; treat as both
         return 'both';
@@ -512,9 +565,78 @@ export interface SyncRunOptions {
 
 export class DriveV2SourceChoiceRequiredError extends Error {
     constructor() {
-        super('Drive v2 source selection is required');
+        super('Google Drive backup source selection is required');
         this.name = 'DriveV2SourceChoiceRequiredError';
     }
+}
+
+async function runDriveV2ExtensionPull(options: {
+    runtime: DriveV2Runtime;
+    settings: ReturnType<typeof getSettings>;
+    namespace: string;
+    allowedTypes: ReadonlySet<SyncItem['type']>;
+    commit: DriveV2CommitMeta;
+    manifest: DrivePackManifestV2;
+    onProgress?: (message: string) => void;
+}): Promise<DriveV2PullResult> {
+    options.onProgress?.('Checking local data…');
+    const scanned = await scanLocal({
+        deviceName: options.settings.deviceName || 'device',
+        scope: options.settings.scope,
+        onProgress: options.onProgress,
+    });
+    const localItems = Object.values(scanned.manifest.items)
+        .filter(item => options.allowedTypes.has(item.type));
+    const localInventory = new Map(localItems.map(item => [item.id, item.type] as const));
+    const localHashes = new Map(localItems.map(item => [item.id, item.hash] as const));
+    const checkpoint = new DriveV2PullCheckpoint(options.commit.commitId);
+    const preparedPersonas: PreparedPersona[] = [];
+
+    return runDriveV2Pull({
+        commit: options.commit,
+        manifest: options.manifest,
+        localInventory,
+        localHashes,
+        allowedTypes: options.allowedTypes,
+        source: options.runtime.store,
+        crypto: options.runtime.crypto,
+        checkpoint,
+        applyItem: async (id, type, bytes) => {
+            if (type === 'persona') {
+                const raw: unknown = JSON.parse(new TextDecoder().decode(bytes));
+                const avatarId = parseItemId(id).parts.join('/');
+                const payload: PersonaPayload = typeof raw === 'string'
+                    ? { avatarId, name: raw, description: null, imageBase64: '' }
+                    : { ...(raw as PersonaPayload), avatarId: (raw as PersonaPayload).avatarId || avatarId };
+                preparedPersonas.push(await preparePersona(payload));
+                return;
+            }
+            if (type !== 'settings') {
+                await applyLocalItem(id, type, bytes, false);
+                return;
+            }
+            const pulledValue: unknown = JSON.parse(new TextDecoder().decode(bytes));
+            const pulled = isPlainObject(pulledValue) ? pulledValue : {};
+            const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
+            const liveValue: unknown = JSON.parse(raw.settings || '{}');
+            const live = isPlainObject(liveValue) ? liveValue : {};
+            const merged = mergePulledSettings(live, pulled);
+            await applyLocalItem(
+                id,
+                type,
+                new TextEncoder().encode(JSON.stringify(merged)),
+                false,
+            );
+        },
+        finalizeApply: () => applyPreparedPersonas(preparedPersonas),
+        deleteItem: deleteLocalItem,
+        verifyInventory: () => listLocalInventory(options.allowedTypes),
+        saveBase: commitId => saveDriveV2Base(options.namespace, {
+            commitId,
+            syncedAt: Date.now(),
+        }),
+        onProgress: event => options.onProgress?.(formatDriveV2PullProgress(event)),
+    });
 }
 
 async function runDriveV2FromEngine(options: {
@@ -523,6 +645,7 @@ async function runDriveV2FromEngine(options: {
     chooseSource?: SyncRunOptions['chooseDriveV2Source'];
     onProgress?: (message: string) => void;
 }): Promise<{ message: string }> {
+    if (options.direction === 'pull') return runDriveV2FastPullFromEngine(options);
     const settings = getSettings();
     const scanStartedAt = performance.now();
     options.onProgress?.('Scanning local…');
@@ -568,63 +691,13 @@ async function runDriveV2FromEngine(options: {
         runPull: async (commit, manifest) => {
             pulledItemCount = Object.values(manifest.items)
                 .filter(item => allowedTypes.has(item.type)).length;
-            const reader = new DriveV2PackReader(runtime.store, runtime.crypto, 2);
-            const crashJournal = typeof localStorage === 'undefined'
-                ? null
-                : new PullCrashJournal(localStorage);
-            return runDriveV2Pull({
+            return runDriveV2ExtensionPull({
+                runtime,
+                settings,
+                namespace: currentNamespace,
+                allowedTypes,
                 commit,
                 manifest,
-                local: scanned.manifest,
-                localScanComplete: true,
-                allowedTypes,
-                reader,
-                saveBlob: storeBlob,
-                applyItem: async (id, type, bytes) => {
-                    if (type !== 'settings') {
-                        await applyLocalItem(id, type, bytes, false);
-                        return;
-                    }
-                    const pulledValue: unknown = JSON.parse(new TextDecoder().decode(bytes));
-                    const pulled = isPlainObject(pulledValue) ? pulledValue : {};
-                    const raw = await stFetchJson<{ settings: string }>('/api/settings/get', {});
-                    const liveValue: unknown = JSON.parse(raw.settings || '{}');
-                    const live = isPlainObject(liveValue) ? liveValue : {};
-                    const merged = mergePulledSettings(live, pulled);
-                    await applyLocalItem(
-                        id,
-                        type,
-                        new TextEncoder().encode(JSON.stringify(merged)),
-                        false,
-                    );
-                },
-                deleteItem: deleteLocalItem,
-                saveBase: commitId => saveDriveV2Base(currentNamespace, {
-                    commitId,
-                    syncedAt: Date.now(),
-                }),
-                journal: {
-                    start: async commitId => {
-                        crashJournal?.startRun();
-                        await startDriveV2PullJournal(currentNamespace, commitId);
-                    },
-                    markCompleted: async itemId => {
-                        crashJournal?.finish(itemId);
-                        await markDriveV2PullItemCompleted(currentNamespace, itemId);
-                    },
-                    finish: async () => {
-                        await clearDriveV2PullJournal(currentNamespace);
-                    },
-                },
-                checkpoint: (item, stage: DriveV2PullStage) => {
-                    crashJournal?.update({
-                        id: item.id,
-                        type: item.type,
-                        hash: item.hash,
-                        size: item.size,
-                        stage,
-                    });
-                },
                 onProgress: options.onProgress,
             });
         },
@@ -645,6 +718,56 @@ async function runDriveV2FromEngine(options: {
     }
 }
 
+async function runDriveV2FastPullFromEngine(options: {
+    direction: 'push' | 'pull';
+    typeFilter?: ReadonlySet<string>;
+    chooseSource?: SyncRunOptions['chooseDriveV2Source'];
+    onProgress?: (message: string) => void;
+}): Promise<{ message: string }> {
+    const settings = getSettings();
+    const runtime = await requireDriveV2Runtime();
+    currentNamespace = `drive:${runtime.layout.rootId}`;
+    const allowedTypes = scopeTypeSet(settings.scope);
+    if (options.typeFilter) {
+        for (const type of [...allowedTypes]) {
+            if (!options.typeFilter.has(type)) allowedTypes.delete(type);
+        }
+    }
+    let pulledItemCount = 0;
+
+    const result = await runDriveV2Sync({
+        direction: 'pull',
+        runtime,
+        namespace: currentNamespace,
+        local: emptyManifest(settings.deviceName || 'device'),
+        allowedTypes,
+        loadBase: () => loadDriveV2Base(currentNamespace),
+        saveBase: base => saveDriveV2Base(currentNamespace, base),
+        chooseSource: options.chooseSource ?? (() => Promise.reject(new DriveV2SourceChoiceRequiredError())),
+        runPush: async () => { throw new Error('Fast Pull cannot push'); },
+        runPull: async (commit, manifest) => {
+            pulledItemCount = Object.values(manifest.items)
+                .filter(item => allowedTypes.has(item.type)).length;
+            return runDriveV2ExtensionPull({
+                runtime,
+                settings,
+                namespace: currentNamespace,
+                allowedTypes,
+                commit,
+                manifest,
+                onProgress: options.onProgress,
+            });
+        },
+    });
+
+    if (result.kind !== 'pulled') return { message: 'Cancelled · no changes' };
+    const seconds = Math.round(result.result.elapsedMs / 1000);
+    settings.lastItemCount = pulledItemCount;
+    settings.lastStatusMessage = `Fast Pull complete · ${seconds}s`;
+    await persistFastPullStatus(settings.lastStatusMessage, settings.lastItemCount);
+    return { message: settings.lastStatusMessage };
+}
+
 function finishDriveV2Push(result: DriveV2PushResult): { message: string } {
     const settings = getSettings();
     settings.lastItemCount = result.metrics.itemCount;
@@ -654,10 +777,10 @@ function finishDriveV2Push(result: DriveV2PushResult): { message: string } {
 }
 
 export async function resumeDriveV2FullPushFromEngine(): Promise<{ message: string }> {
-    if (!activeDriveV2Controller) throw new Error('No paused Drive v2 Push to resume');
+    if (!activeDriveV2Controller) throw new Error('No paused Google Drive upload to resume');
     await activeDriveV2Controller.resume();
     const result = driveV2ControllerResult(activeDriveV2Controller);
-    if (!result) throw new Error('Drive v2 Push resumed without a result');
+    if (!result) throw new Error('Google Drive upload resumed without a result');
     if (activeDriveV2PushNamespace) {
         await saveDriveV2Base(activeDriveV2PushNamespace, {
             commitId: result.commitId,
@@ -716,9 +839,9 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
         }
     }
     if (s.backendMode === 'drive' && s.driveRootVersion === 2) {
-        if (opts.dryRun) throw new Error('Drive v2 does not support dry-run sync');
+        if (opts.dryRun) throw new Error('Google Drive backup does not support dry-run sync');
         if (opts.direction === 'both') {
-            throw new Error('Drive v2 requires an explicit Push or Pull direction');
+            throw new Error('Google Drive backup requires an explicit Push or Pull direction');
         }
         return runDriveV2FromEngine({
             direction: opts.direction,

@@ -57,11 +57,32 @@ TavernSync ขอ access token ฝั่งเบราว์เซอร์ต�
 2. กด **Connect Google** → ล็อกอินด้วย **บัญชี Google เดียวกัน**
 3. ใส่ **passphrase เดียวกัน** → Unlock → **↓ Pull** จะได้ข้อมูลครบ
 
+## วิธีใช้งานหลังตั้งค่าเสร็จ
+
+ผู้ใช้ติดตั้งหรืออัปเดต **TavernSync extension อย่างเดียว** ไม่ต้องลง plugin, patch SillyTavern, เปิด terminal หรือใช้ Git:
+
+```text
+Install/Update TavernSync → Refresh ST → Connect Google
+→ ใส่ Encryption passphrase เดียวกัน → Push หรือ Pull
+```
+
+- **Push ที่ commit สำเร็จล่าสุด** คือ snapshot ปัจจุบันบน Drive
+- **Pull** หยิบ snapshot ล่าสุดเสมอ ไม่ merge และไม่ถามว่าเครื่องไหนชนะ
+- ถ้า Pull หลุดหรือรีเฟรช ให้ Connect/Unlock แล้วกด Pull ใหม่ ระบบจะทำต่อจาก checkpoint ของ snapshot เดิม
+- ระบบเขียนรายการทั้งหมดก่อน แล้วจึงลบรายการที่ไม่มีใน snapshot เป็นขั้นตอนสุดท้าย
+- ถ้า Google login หมดอายุ ให้กด **Connect Google** แล้วกด Pull อีกครั้ง
+
+### ปุ่มล้างข้อมูลสามแบบไม่เหมือนกัน
+
+- **Clean up old data** — ย้าย pack/manifest เก่าที่ snapshot ปัจจุบันไม่ใช้แล้วไปถังขยะ โดยไม่แตะ snapshot ที่กำลังใช้งาน
+- **Wipe remote sync data** — ล้างสถานะซิงก์บน remote ตามคำเตือนของปุ่ม ข้อมูล SillyTavern ในเครื่องยังอยู่
+- **Reset to empty Drive v2 Root** — ย้าย Root ปัจจุบันทั้งก้อนไป Drive Trash แล้วสร้าง Root ใหม่ว่าง ข้อมูล SillyTavern ในเครื่องยังอยู่
+
 ## คำเตือนสำคัญ
 
-- **อย่าลบโฟลเดอร์ TavernSync ใน Google Drive** (รวมถึงโฟลเดอร์ย่อย `manifests/` และ `blobs/`) — ลบคือข้อมูลซิงก์หาย ถ้าเผลอลบให้รีจากถังขยะ Drive ก่อนว่าง
+- **อย่าลบโฟลเดอร์ TavernSync ใน Google Drive** (รวมถึงโฟลเดอร์ย่อย `manifests/` และ `packs/`) — ลบคือข้อมูลซิงก์หาย ถ้าเผลอลบให้กู้จากถังขยะ Drive ก่อน
 - **เก็บ local backup เสมอ** — Google Drive เป็นเพียงตัวกลางซิงก์ ไม่ใช่ที่เก็บสำรอง
-- **ทำ passphrase หาย = ข้อมูลบน Drive อ่านไม่ได้** ไฟล์ทั้งหมดเป็น `.enc` ชื่อ hex เข้ารหัสด้วยคีย์จาก passphrase ของคุณ ไม่มีทางกู้ — จดเก็บไว้ที่ปลอดภัย
+- **ทำ passphrase หาย = ข้อมูลบน Drive อ่านไม่ได้** ไฟล์ทั้งหมดเป็น ciphertext ชื่อที่ซ่อนด้วยคีย์จาก passphrase ของคุณ ไม่มีทางกู้ ข้อมูลจะค้างเป็นขยะเข้ารหัสใน Drive/Trash จนกว่าจะลบถาวร — จด passphrase ไว้ที่ปลอดภัย
 - กด **Disconnect** จะถอน token ฝั่ง Google ด้วย — ถ้าอยากเพิกถอนสิทธิ์ถาวร ไปที่ [myaccount.google.com/permissions](https://myaccount.google.com/permissions)
 - **อย่า commit หรือส่ง Client ID/secret ขึ้นที่สาธารณะ** ถ้าไม่จำเป็น (Client ID ไม่ใช่ความลับ แต่เลี่ยงไว้ดีกว่า)
 
@@ -75,11 +96,11 @@ TavernSync ขอ access token ฝั่งเบราว์เซอร์ต�
 - [ ] **First-run folder:** เครื่องแรกสร้างโฟลเดอร์ `TavernSync` ใน Drive อัตโนมัติ — เช็กในเว็บ Drive เห็นโฟลเดอร์จริง
 - [ ] **Multi-root picker:** (จำลองโดยสร้างโฟลเดอร์ TavernSync ซ้ำเองใน Drive อีกอัน) Connect ใหม่ → popup เลือก root เด้ง → **ยืนยันว่าเลือก radio แล้วกด OK ได้ค่าที่เลือกจริง** (ไม่ได้ค่า null/ค่าแรกเสมอ) — *ความเสี่ยงที่ยังไม่ได้ยืนยัน: DOM ของ popup อาจถูก detach หลัง confirm ทำให้ `document.querySelector('input[name="ts_drive_root"]:checked')` ใน `src/index.ts pickDriveRoot` อ่านค่าไม่ได้* — ถ้าพังให้รายงานเป็น bug
 - [ ] **Unlock:** ใส่ passphrase → Unlock สำเร็จ → รีเฟรชหน้าแล้วยังจำคีย์ (ไม่ต้อง Unlock ใหม่) ถ้าไม่ได้เปิดโหมดถามทุกครั้ง
-- [ ] **First push:** Push ข้อมูลจริงขึ้น Drive → ในเว็บ Drive เห็น `TavernSync/manifests/` + `blobs/` เป็นไฟล์ `.enc` ชื่อ hex **เท่านั้น** (ไม่มีชื่อไฟล์/เนื้อหาอ่านได้)
+- [ ] **First push:** Push ข้อมูลจริงขึ้น Drive → ในเว็บ Drive เห็น `TavernSync/manifests/` + `packs/` เป็น ciphertext ชื่อที่อ่านความหมายไม่ได้ **เท่านั้น** (ไม่มีชื่อไฟล์/เนื้อหาเดิม)
 - [ ] **Pull เครื่อง 2:** browser profile/เครื่องอื่น — Client ID + บัญชี Google + passphrase เดียวกัน → Connect → Unlock → Pull ได้ข้อมูลครบ (ตัวละคร/แชท/การตั้งค่าตาม scope)
-- [ ] **Fork conflict:** แก้ไขคนละเครื่องสวนกัน → Push ทั้งคู่ → ฝั่งหลังเจอ conflict → fork ถูก merge หรือ conflict UI เด้งตามคาด เลือกแก้ผ่าน UI ได้จนซิงก์ต่อได้
+- [ ] **Stale Push choice:** Push จากเครื่องที่ยังไม่ได้ Pull snapshot ล่าสุด → กล่องเลือก Drive/เครื่องนี้/ยกเลิกทำงาน และผลที่เลือกกลายเป็น snapshot ล่าสุด
 - [ ] **ออฟไลน์กลาง push:** ปิดเน็ตระหว่าง Push → error ชัดเจน → เปิดเน็ต Push ใหม่ได้ปกติ ไม่มีไฟล์เสีย/manifest พัง
-- [ ] **Passphrase ผิด:** ใส่ผิดตอน Unlock → decrypt fail error ชัดเจน **และไม่มีการเขียนทับข้อมูลบน Drive**
+- [ ] **Passphrase ผิด:** ใส่ผิดแล้ว Pull → decrypt fail ก่อนเขียนข้อมูล SillyTavern และไม่มีการเขียนทับข้อมูลบน Drive
 - [ ] **GC:** กดปุ่ม GC → ไฟล์ที่กำลังถูกอ้างถึงไม่หาย, blob/manifest orphan เก่าถูกย้ายเข้าถังขยะ Drive
 - [ ] **Disconnect:** กด Disconnect → token ถูก revoke → Push/Pull ต่อไม่ได้จนกว่าจะ Connect ใหม่
 - [ ] **สลับ backend:** เปลี่ยนกลับ backend Worker เดิม → Push/Pull ใช้ได้เหมือนเดิม (คีย์ E2EE ที่จำไว้ของทั้งสอง backend ไม่ปนกัน)

@@ -1,196 +1,203 @@
-import { PULL_TYPE_ORDER } from '../../sync-core/plan';
-import type { ItemType, Manifest } from '../../sync-core/types';
+import type { ItemType } from '../../sync-core/types';
+import {
+    classifyPullJob,
+    runAdaptivePullQueue,
+} from './adaptive-pull-queue';
+import { ByteBudget } from './byte-budget';
 import type { DriveV2CommitMeta } from './drive-v2-head';
-import type { DriveV2PackReader } from './pack-reader';
-import type { DrivePackItemV2, DrivePackManifestV2 } from './pack-types';
+import type { DrivePackCrypto } from './pack-crypto';
+import { DriveV2PackReader, type DriveV2PackSource } from './pack-reader';
+import type { DrivePackManifestV2 } from './pack-types';
+import type { DriveV2PullCheckpoint } from './pull-checkpoint';
 
-export interface DriveV2PullJournal {
-    start(commitId: string): Promise<void>;
-    markCompleted(itemId: string): Promise<void>;
-    finish(commitId: string): Promise<void>;
+const DEFAULT_ENCRYPTED_BUDGET = 64 * 1024 * 1024;
+const DEFAULT_PLAINTEXT_BUDGET = 48 * 1024 * 1024;
+const SELF_EXTENSION_ID = 'extension/st-tavernsync';
+
+function isSelfExtension(id: string): boolean {
+    return id.toLowerCase() === SELF_EXTENSION_ID;
 }
 
-export type DriveV2PullStage = 'downloading' | 'storing' | 'applying';
+export interface DriveV2PullProgressEvent {
+    readonly stage: 'apply';
+    readonly completedItems: number;
+    readonly totalItems: number;
+    readonly itemType: string;
+    readonly itemsPerSecond: number;
+    readonly activeWriters: number;
+    readonly downloadedPacks: number;
+    readonly uniquePacksRequired: number;
+    readonly packDownloadRequests: number;
+    readonly etaSeconds: number;
+}
 
 export interface DriveV2PullOptions {
-    commit: DriveV2CommitMeta;
-    manifest: DrivePackManifestV2;
-    local: Manifest;
-    localScanComplete: boolean;
-    allowedTypes: ReadonlySet<ItemType>;
-    reader: DriveV2PackReader;
-    applyItem(id: string, type: ItemType, bytes: Uint8Array): Promise<void>;
-    deleteItem(id: string, type: ItemType): Promise<void>;
-    saveBlob(hash: string, bytes: Uint8Array): Promise<void>;
-    saveBase(commitId: string): Promise<void>;
-    journal: DriveV2PullJournal;
-    checkpoint?(item: DrivePackItemV2, stage: DriveV2PullStage): void;
-    onProgress?(message: string): void;
-    applyConcurrency?: number;
-    maxPreparedBytes?: number;
-    signal?: AbortSignal;
-    now?(): number;
+    readonly commit: DriveV2CommitMeta;
+    readonly manifest: DrivePackManifestV2;
+    readonly localInventory: ReadonlyMap<string, ItemType>;
+    readonly localHashes?: ReadonlyMap<string, string>;
+    readonly allowedTypes: ReadonlySet<ItemType>;
+    readonly source: Pick<DriveV2PackSource, 'readPack'>;
+    readonly crypto: Pick<DrivePackCrypto, 'decryptChunk'>;
+    readonly checkpoint: DriveV2PullCheckpoint;
+    readonly applyItem: (id: string, type: ItemType, bytes: Uint8Array) => Promise<void>;
+    readonly finalizeApply?: () => Promise<void>;
+    readonly deleteItem: (id: string, type: ItemType) => Promise<void>;
+    readonly verifyInventory?: () => Promise<ReadonlyMap<string, ItemType>>;
+    readonly saveBase: (commitId: string) => Promise<void>;
+    readonly onProgress?: (event: DriveV2PullProgressEvent) => void;
+    readonly signal?: AbortSignal;
+    readonly encryptedBudget?: ByteBudget;
+    readonly plaintextBudget?: ByteBudget;
 }
 
 export interface DriveV2PullResult {
-    commitId: string;
-    applied: number;
-    deleted: number;
-    skippedInSync: number;
-    downloadedPacks: number;
-    peakCachedBytes: number;
-    elapsedMs: number;
-}
-
-const typeRank = new Map<ItemType, number>(
-    PULL_TYPE_ORDER.map((type, index) => [type, index]),
-);
-
-function sortItems<T extends { id: string; type: ItemType }>(items: readonly T[]): T[] {
-    return [...items].sort((a, b) =>
-        (typeRank.get(a.type) ?? 50) - (typeRank.get(b.type) ?? 50)
-        || a.id.localeCompare(b.id));
-}
-
-function assertNotAborted(signal: AbortSignal | undefined): void {
-    if (!signal?.aborted) return;
-    throw signal.reason ?? new DOMException('Pull cancelled', 'AbortError');
-}
-
-function pullBatches(
-    items: readonly DrivePackItemV2[],
-    concurrency: number,
-    maxPreparedBytes: number,
-): DrivePackItemV2[][] {
-    const batches: DrivePackItemV2[][] = [];
-    let batch: DrivePackItemV2[] = [];
-    let batchBytes = 0;
-
-    const flush = (): void => {
-        if (batch.length) batches.push(batch);
-        batch = [];
-        batchBytes = 0;
-    };
-
-    for (const item of items) {
-        const itemBytes = Math.max(1, item.size);
-        if (batch.length && (
-            batch[0].type !== item.type
-            || batch.length >= concurrency
-            || batchBytes + itemBytes > maxPreparedBytes
-        )) flush();
-        batch.push(item);
-        batchBytes += itemBytes;
-        if (itemBytes > maxPreparedBytes) flush();
-    }
-    flush();
-    return batches;
+    readonly commitId: string;
+    readonly applied: number;
+    readonly deleted: number;
+    readonly skippedInSync: number;
+    readonly downloadedPacks: number;
+    readonly packDownloadRequests: number;
+    readonly peakCachedBytes: number;
+    readonly peakEncryptedBytes: number;
+    readonly peakPlaintextBytes: number;
+    readonly maxActiveWriters: number;
+    readonly elapsedMs: number;
 }
 
 export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<DriveV2PullResult> {
-    if (!options.localScanComplete) throw new Error('local scan incomplete');
-
-    const now = options.now ?? (() => performance.now());
-    const startedAt = now();
-    const remoteItems = Object.values(options.manifest.items)
-        .filter(item => options.allowedTypes.has(item.type));
-    const changed = sortItems(remoteItems.filter(item =>
-        options.local.items[item.id]?.hash !== item.hash));
-    const skippedInSync = remoteItems.length - changed.length;
-    const deletions = sortItems(Object.values(options.local.items).filter(item =>
-        options.allowedTypes.has(item.type) && !options.manifest.items[item.id]));
-
-    const applyConcurrency = Math.max(1, Math.floor(options.applyConcurrency ?? 4));
-    const maxPreparedBytes = Math.max(1, Math.floor(options.maxPreparedBytes ?? 16 * 1024 * 1024));
-    const batches = pullBatches(changed as DrivePackItemV2[], applyConcurrency, maxPreparedBytes);
-    const batchBytes = (batch: readonly DrivePackItemV2[]): number =>
-        batch.reduce((total, item) => total + Math.max(1, item.size), 0);
-    const prepareBatch = async (
-        batch: readonly DrivePackItemV2[],
-        startIndex: number,
-    ): Promise<Array<{ item: DrivePackItemV2; bytes: Uint8Array }>> => {
-        const prepared: Array<{ item: DrivePackItemV2; bytes: Uint8Array }> = [];
-        for (const item of batch) {
-            assertNotAborted(options.signal);
-            options.onProgress?.(`Preparing ${startIndex + prepared.length + 1}/${changed.length} · ${item.type}`);
-            options.checkpoint?.(item, 'downloading');
-            prepared.push({ item, bytes: await options.reader.readItem(item) });
-        }
-        return prepared;
-    };
-    type PreparedResult =
-        | { ok: true; value: Array<{ item: DrivePackItemV2; bytes: Uint8Array }> }
-        | { ok: false; error: unknown };
-    const prepareSafely = (
-        batch: readonly DrivePackItemV2[],
-        startIndex: number,
-    ): Promise<PreparedResult> => prepareBatch(batch, startIndex).then(
-        value => ({ ok: true, value }),
-        error => ({ ok: false, error }),
+    const encryptedBudget = options.encryptedBudget ?? new ByteBudget(DEFAULT_ENCRYPTED_BUDGET);
+    const plaintextBudget = options.plaintextBudget ?? new ByteBudget(DEFAULT_PLAINTEXT_BUDGET);
+    const packCacheSlots = Math.max(1, Math.min(
+        2,
+        Math.floor(encryptedBudget.capacityBytes / Math.max(1, options.manifest.packBytes)),
+    ));
+    const packReader = new DriveV2PackReader(
+        options.source,
+        options.crypto,
+        packCacheSlots,
     );
+    const remote = Object.values(options.manifest.items)
+        .filter(item => options.allowedTypes.has(item.type) && !isSelfExtension(item.id));
+    const remoteIds = new Set(remote.map(item => item.id));
+    const resumedIds = new Set(remote
+        .filter(item => options.checkpoint.completedIds.has(item.id)
+            && options.localHashes?.get(item.id) === item.hash)
+        .map(item => item.id));
+    const exactHashIds = new Set(remote
+        .filter(item => options.localHashes?.get(item.id) === item.hash)
+        .map(item => item.id));
+    const skippedIds = new Set([...resumedIds, ...exactHashIds]);
+    for (const item of remote) {
+        if (item.type !== 'characterstate' || !skippedIds.has(item.id)) continue;
+        const avatar = item.id.split('/').slice(1).join('/');
+        const characterId = `character/${avatar}`;
+        if (remoteIds.has(characterId) && !skippedIds.has(characterId)) {
+            skippedIds.delete(item.id);
+        }
+    }
+    const jobs = remote
+        .filter(item => !skippedIds.has(item.id))
+        .map(item => {
+            const job = classifyPullJob(item, remoteIds);
+            return {
+                ...job,
+                dependencies: job.dependencies.filter(id => !skippedIds.has(id)),
+            };
+        });
+    jobs.sort((left, right) => {
+        const leftPack = left.item.chunks[0]?.packName ?? '';
+        const rightPack = right.item.chunks[0]?.packName ?? '';
+        return leftPack.localeCompare(rightPack);
+    });
+    const uniquePacksRequired = new Set(jobs.flatMap(job =>
+        job.item.chunks.map(chunk => chunk.packName))).size;
+    const deletions = [...options.localInventory]
+        .filter(([id, type]) => options.allowedTypes.has(type)
+            && !isSelfExtension(id)
+            && !remoteIds.has(id))
+        .sort(([left], [right]) => left.localeCompare(right));
+    try {
+        const metrics = await runAdaptivePullQueue({
+            jobs,
+            signal: options.signal,
+            async run(job) {
+                const plainPermit = await plaintextBudget.acquire(
+                    Math.max(1, job.item.size),
+                    options.signal,
+                );
+                let bytes: Uint8Array | null = null;
+                try {
+                    options.signal?.throwIfAborted();
+                    bytes = await packReader.readItem(job.item);
+                    await options.applyItem(job.item.id, job.item.type, bytes);
+                    options.checkpoint.markCompleted(job.item.id);
+                } finally {
+                    bytes?.fill(0);
+                    plainPermit.release();
+                }
+            },
+            onSnapshot: snapshot => options.onProgress?.({
+                stage: 'apply',
+                completedItems: skippedIds.size + snapshot.completed,
+                totalItems: remote.length,
+                itemType: snapshot.lastItemType,
+                itemsPerSecond: snapshot.itemsPerSecond,
+                activeWriters: snapshot.activeWriters,
+                downloadedPacks: packReader.getDownloadedPackCount(),
+                uniquePacksRequired,
+                packDownloadRequests: packReader.getPackDownloadRequestCount(),
+                etaSeconds: snapshot.etaSeconds,
+            }),
+        });
 
-    await options.journal.start(options.commit.commitId);
-    let applied = 0;
-    let preparedThrough = batches[0]?.length ?? 0;
-    let preparedResult = batches.length
-        ? prepareSafely(batches[0], 0)
-        : null;
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-        const currentResult = await preparedResult!;
-        if (!currentResult.ok) throw currentResult.error;
-        const prepared = currentResult.value;
-        const nextBatch = batches[batchIndex + 1];
-        const canPrefetch = nextBatch
-            && batchBytes(batches[batchIndex]) <= maxPreparedBytes
-            && batchBytes(nextBatch) <= maxPreparedBytes;
-        const nextStartIndex = preparedThrough;
-        let nextResult = canPrefetch
-            ? prepareSafely(nextBatch, nextStartIndex)
-            : null;
-        if (nextBatch) preparedThrough += nextBatch.length;
+        await options.finalizeApply?.();
 
-        const outcomes = await Promise.allSettled(prepared.map(async ({ item, bytes }) => {
-            options.checkpoint?.(item, 'storing');
-            await options.saveBlob(item.hash, bytes);
-            options.checkpoint?.(item, 'applying');
-            await options.applyItem(item.id, item.type, bytes);
-            return item;
-        }));
-        let failure: unknown;
-        for (const outcome of outcomes) {
-            if (outcome.status === 'rejected') {
-                failure ??= outcome.reason;
-                continue;
+        for (const [id, type] of deletions) {
+            options.signal?.throwIfAborted();
+            await options.deleteItem(id, type);
+        }
+
+        if (options.verifyInventory) {
+            const actual = await options.verifyInventory();
+            const expected = new Map(remote.map(item => [item.id, item.type] as const));
+            const missing = [...expected]
+                .filter(([id, type]) => actual.get(id) !== type)
+                .map(([id]) => id)
+                .sort();
+            const unexpected = [...actual]
+                .filter(([id, type]) => options.allowedTypes.has(type)
+                    && !isSelfExtension(id)
+                    && !expected.has(id))
+                .map(([id]) => id)
+                .sort();
+            if (missing.length || unexpected.length) {
+                const details = [
+                    missing.length ? `missing ${missing.join(', ')}` : '',
+                    unexpected.length ? `unexpected ${unexpected.join(', ')}` : '',
+                ].filter(Boolean).join('; ');
+                throw new Error(`Restore inventory incomplete: ${details}`);
             }
-            await options.journal.markCompleted(outcome.value.id);
-            applied += 1;
-            options.onProgress?.(`Applying ${applied}/${changed.length} · ${outcome.value.type}`);
         }
-        if (failure !== undefined) throw failure;
-        if (nextBatch && !nextResult) {
-            nextResult = prepareSafely(nextBatch, nextStartIndex);
-        }
-        preparedResult = nextResult;
+
+        await options.saveBase(options.commit.commitId);
+        options.checkpoint.finish();
+
+        return {
+            commitId: options.commit.commitId,
+            applied: metrics.completed,
+            deleted: deletions.length,
+            skippedInSync: skippedIds.size,
+            downloadedPacks: packReader.getDownloadedPackCount(),
+            packDownloadRequests: packReader.getPackDownloadRequestCount(),
+            peakCachedBytes: packReader.getPeakCachedBytes(),
+            peakEncryptedBytes: packReader.getPeakCachedBytes(),
+            peakPlaintextBytes: plaintextBudget.peakBytes,
+            maxActiveWriters: metrics.maxActiveWriters,
+            elapsedMs: metrics.elapsedMs,
+        };
+    } catch (error) {
+        options.checkpoint.flushIfDue(true);
+        throw error;
     }
-
-    let deleted = 0;
-    for (const item of deletions) {
-        assertNotAborted(options.signal);
-        options.onProgress?.(`Deleting ${deleted + 1}/${deletions.length}`);
-        await options.deleteItem(item.id, item.type);
-        deleted += 1;
-    }
-
-    await options.saveBase(options.commit.commitId);
-    await options.journal.finish(options.commit.commitId);
-
-    return {
-        commitId: options.commit.commitId,
-        applied,
-        deleted,
-        skippedInSync,
-        downloadedPacks: options.reader.getDownloadedPackCount(),
-        peakCachedBytes: options.reader.getPeakCachedBytes(),
-        elapsedMs: Math.max(0, now() - startedAt),
-    };
 }

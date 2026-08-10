@@ -86,6 +86,7 @@ export const PULL_TYPE_ORDER = [
     'worldinfo',
     'preset',
     'character',
+    'characterasset',
     'chat',
     'group',
     'groupchat',

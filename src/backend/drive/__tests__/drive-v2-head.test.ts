@@ -5,6 +5,7 @@ import {
     computeDriveV2Heads,
     parentProperties,
     parseDriveV2Commit,
+    selectNewestDriveV2Head,
     type DriveV2CommitMeta,
 } from '../drive-v2-head';
 
@@ -17,6 +18,16 @@ function commit(commitId: string, parents: string[]): DriveV2CommitMeta {
 }
 
 describe('Drive v2 commit heads', () => {
+    it('selects by Drive createdTime then Drive fileId, never commit name', () => {
+        const heads = [
+            { fileId: 'file-z', commitId: 'commit-a', parents: [], createdTime: '2026-08-10T01:00:00Z' },
+            { fileId: 'file-a', commitId: 'commit-z', parents: [], createdTime: '2026-08-10T02:00:00Z' },
+            { fileId: 'file-z', commitId: 'commit-b', parents: [], createdTime: '2026-08-10T02:00:00Z' },
+        ];
+
+        expect(selectNewestDriveV2Head(heads).commitId).toBe('commit-b');
+    });
+
     it('treats a Phase-1 commit without parents as the genesis head', () => {
         const genesis = file('g.enc', { ts: 'commit-v2' });
         expect(parseDriveV2Commit(genesis)).toMatchObject({ commitId: 'g', parents: [] });

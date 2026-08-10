@@ -1,5 +1,6 @@
 import type { ItemType } from '../sync-core/types';
 import { stFetchDelete, stFetchJson } from './http';
+import { decodeCharacterAssetId } from './character-assets';
 import { writeSettings } from './write';
 
 const MISSING_STATUSES = [400, 404] as const;
@@ -33,6 +34,19 @@ export async function deleteLocalItem(id: string, type: ItemType): Promise<void>
                 delete_chats: false,
             }, MISSING_STATUSES);
             return;
+        case 'characterasset': {
+            const { characterName, relativePath } = decodeCharacterAssetId(id);
+            const pathParts = relativePath.split('/');
+            const filename = pathParts.pop();
+            if (!filename) throw new Error(`Character asset is missing a filename: ${id}`);
+            const spriteName = filename.replace(/\.[^.]+$/, '');
+            await stFetchDelete('/api/sprites/delete', {
+                name: [characterName, ...pathParts].join('/'),
+                label: spriteName,
+                spriteName,
+            }, MISSING_STATUSES);
+            return;
+        }
         case 'chat': {
             const [avatarUrl, ...chatParts] = parts;
             await stFetchDelete('/api/chats/delete', {
@@ -46,6 +60,14 @@ export async function deleteLocalItem(id: string, type: ItemType): Promise<void>
             return;
         case 'groupchat':
             await stFetchDelete('/api/chats/group/delete', { id: parts.join('/') }, MISSING_STATUSES);
+            return;
+        case 'userimage':
+            await stFetchDelete('/api/images/delete', {
+                path: `user/images/${parts.join('/')}`,
+            }, MISSING_STATUSES);
+            return;
+        case 'characterstate':
+        case 'extension':
             return;
         case 'persona':
             await deletePersona(parts.join('/'));

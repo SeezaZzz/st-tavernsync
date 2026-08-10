@@ -44,6 +44,7 @@ function pushHarness(config: { packCount: number; concurrency: number; failPack?
         async listCommits() { return []; },
         async readManifest() { throw new Error('not used'); },
         async readPack() { throw new Error('not used'); },
+        async listPacks() { return new Map(); },
         async putPack(pack: EncryptedPack) {
             const uploadNumber = uploads++;
             active += 1;
@@ -140,6 +141,7 @@ describe('Drive v2 Full Push', () => {
                 async listCommits() { return []; },
                 async readManifest() { throw new Error('not used'); },
                 async readPack() { throw new Error('not used'); },
+                async listPacks() { return new Map(); },
                 async putPack() { return undefined; },
                 async verifyPacks() { abort.abort(); },
                 async commitManifest() { commits += 1; return { commitId: 'bad-commit' }; },
@@ -160,7 +162,7 @@ describe('Drive v2 Full Push', () => {
 
     it('blocks the ambiguous v2 both direction', async () => {
         await expect(runSync({ direction: 'both' }))
-            .rejects.toThrow('Drive v2 requires an explicit Push or Pull direction');
+            .rejects.toThrow('Google Drive backup requires an explicit Push or Pull direction');
     });
 
     it('resumes an auth-paused pack with the same ciphertext and session', async () => {
@@ -176,6 +178,7 @@ describe('Drive v2 Full Push', () => {
             async listCommits() { return []; },
             async readManifest() { throw new Error('not used'); },
             async readPack() { throw new Error('not used'); },
+            async listPacks() { return new Map(); },
             async putPack(pack: EncryptedPack, control?: { resume?: unknown }) {
                 if (!pausedPack) {
                     pausedPack = pack;
