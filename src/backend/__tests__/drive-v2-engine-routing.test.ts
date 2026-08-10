@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const harness = vi.hoisted(() => ({
@@ -7,10 +9,17 @@ const harness = vi.hoisted(() => ({
         itemCount: 0,
         refreshedBlobIds: [],
     })),
-    coreRestore: vi.fn(async () => ({
+    listLocalInventory: vi.fn(async () => new Map()),
+    adaptivePull: vi.fn(async () => ({
         commitId: 'head-a',
-        uploadedBatches: 1,
-        uploadedBytes: 1,
+        applied: 0,
+        deleted: 0,
+        skippedInSync: 0,
+        downloadedPacks: 0,
+        peakCachedBytes: 0,
+        peakEncryptedBytes: 0,
+        peakPlaintextBytes: 0,
+        maxActiveWriters: 0,
         elapsedMs: 40,
     })),
     runDriveV2Sync: vi.fn(async (options: {
@@ -19,7 +28,12 @@ const harness = vi.hoisted(() => ({
     }) => {
         harness.directions.push(options.direction);
         if (options.direction === 'pull') {
-            const commit = { fileId: 'file-a', commitId: 'head-a', parents: [], createdTime: '2026-01-01' };
+            const commit = {
+                fileId: 'file-a',
+                commitId: 'head-a',
+                parents: [],
+                createdTime: '2026-01-01',
+            };
             const manifest = {
                 schema: 2 as const,
                 storage: 'drive-pack-v2' as const,
@@ -69,13 +83,17 @@ vi.mock('../drive/drive-v2-sync', async importOriginal => {
 
 vi.mock('../../st-adapter/scan', async importOriginal => {
     const original = await importOriginal<typeof import('../../st-adapter/scan')>();
-    return {
-        ...original,
-        scanLocal: harness.scanLocal,
-    };
+    return { ...original, scanLocal: harness.scanLocal };
 });
 
-vi.mock('../drive/core-restore', () => ({ runDriveV2CoreRestore: harness.coreRestore }));
+vi.mock('../../st-adapter/inventory', () => ({
+    listLocalInventory: harness.listLocalInventory,
+}));
+
+vi.mock('../drive/drive-v2-pull', async importOriginal => {
+    const original = await importOriginal<typeof import('../drive/drive-v2-pull')>();
+    return { ...original, runDriveV2Pull: harness.adaptivePull };
+});
 
 vi.mock('../drive/oauth', () => ({
     getSharedGisTokenProvider: () => ({ getToken: async () => 'token' }),
@@ -87,7 +105,8 @@ beforeEach(async () => {
     harness.directions.length = 0;
     harness.runDriveV2Sync.mockClear();
     harness.scanLocal.mockClear();
-    harness.coreRestore.mockClear();
+    harness.listLocalInventory.mockClear();
+    harness.adaptivePull.mockClear();
     (globalThis as unknown as { SillyTavern: unknown }).SillyTavern = {
         libs: {
             localforage: {
@@ -125,17 +144,19 @@ describe('Drive v2 engine routing', () => {
         expect(harness.directions).toContain(direction);
     });
 
-    it('routes Drive v2 Pull to the core restore client before browser scan', async () => {
+    it('routes Drive v2 Pull to extension-only restore before full browser scan', async () => {
         await runSync({ direction: 'pull' });
+
         expect(harness.scanLocal).not.toHaveBeenCalled();
-        expect(harness.coreRestore).toHaveBeenCalledWith(expect.objectContaining({
-            selectedCommitId: 'head-a',
+        expect(harness.listLocalInventory).toHaveBeenCalledOnce();
+        expect(harness.adaptivePull).toHaveBeenCalledWith(expect.objectContaining({
+            commit: expect.objectContaining({ commitId: 'head-a' }),
         }));
     });
 
-    it('has no Drive v2 Legacy Pull branch', async () => {
-        await runSync({ direction: 'pull' });
-        expect(harness.scanLocal).not.toHaveBeenCalled();
-        expect(harness.coreRestore).toHaveBeenCalledOnce();
+    it('contains no Core restore or restore-session imports', () => {
+        const source = readFileSync(new URL('../../sync/engine.ts', import.meta.url), 'utf8');
+
+        expect(source).not.toMatch(/core-restore|restore-session|RestoreSessionClient|runDriveV2CoreRestore/);
     });
 });

@@ -44,6 +44,7 @@ function pushHarness(config: { packCount: number; concurrency: number; failPack?
         async listCommits() { return []; },
         async readManifest() { throw new Error('not used'); },
         async readPack() { throw new Error('not used'); },
+        async listPacks() { return new Map(); },
         async putPack(pack: EncryptedPack) {
             const uploadNumber = uploads++;
             active += 1;
@@ -140,6 +141,7 @@ describe('Drive v2 Full Push', () => {
                 async listCommits() { return []; },
                 async readManifest() { throw new Error('not used'); },
                 async readPack() { throw new Error('not used'); },
+                async listPacks() { return new Map(); },
                 async putPack() { return undefined; },
                 async verifyPacks() { abort.abort(); },
                 async commitManifest() { commits += 1; return { commitId: 'bad-commit' }; },
@@ -176,6 +178,7 @@ describe('Drive v2 Full Push', () => {
             async listCommits() { return []; },
             async readManifest() { throw new Error('not used'); },
             async readPack() { throw new Error('not used'); },
+            async listPacks() { return new Map(); },
             async putPack(pack: EncryptedPack, control?: { resume?: unknown }) {
                 if (!pausedPack) {
                     pausedPack = pack;

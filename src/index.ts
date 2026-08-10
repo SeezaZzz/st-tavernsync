@@ -49,11 +49,6 @@ import {
 } from './sync/engine';
 import { PullCrashJournal, formatInterruptedPull } from './sync/pull-crash-journal';
 import { promptConflicts } from './ui/conflict';
-import {
-    isRestoreUpdateRequired,
-    promptRestoreReload,
-    RESTORE_UPDATE_REQUIRED_MESSAGE,
-} from './ui/update-required';
 import { promptDriveV2SourceChoice } from './ui/drive-v2-source-choice';
 
 function getCtx() {
@@ -580,15 +575,13 @@ async function handlePull(): Promise<void> {
         const { message } = await execute();
         setStatusLine(message);
         toastr.success(message, 'TavernSync pull');
-        if (message.startsWith('Fast Pull complete') && await promptRestoreReload()) {
+        if (message.startsWith('Fast Pull complete') && window.confirm(
+            'Fast Pull restored the complete Drive snapshot.\n\nReload now so SillyTavern reads every updated item?',
+        )) {
             location.reload();
         }
     } catch (e) { // no-excuse-ok: catch -- top-level UI boundary converts restore failures into explicit user choices/toasts.
         console.error(LOG_PREFIX, e);
-        if (isRestoreUpdateRequired(e)) {
-            toastr.error(RESTORE_UPDATE_REQUIRED_MESSAGE, 'TavernSync');
-            return;
-        }
         toastr.error(`Pull failed: ${String(e)}`, 'TavernSync');
     }
 }
