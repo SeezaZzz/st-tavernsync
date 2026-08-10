@@ -5,7 +5,9 @@ import {
     driveV2Visibility,
     formatDriveV2PullProgress,
     formatDriveV2PushProgress,
+    isDriveReconnectRequired,
 } from '../drive-v2-ui-state';
+import { DriveAuthError } from '../client';
 
 describe('Drive v2 UI state', () => {
     it('formats measurable progress with throughput and ETA', () => {
@@ -37,17 +39,25 @@ describe('Drive v2 UI state', () => {
             completedItems: 724,
             totalItems: 2347,
             itemType: 'chat',
-        })).toBe('Applying 724/2347 · chat');
+            itemsPerSecond: 24.5,
+            activeWriters: 7,
+            etaSeconds: 66,
+        })).toBe('Restoring 724/2347 · 24.5 items/s · 7 writers · ETA 01:06');
         expect(formatDriveV2PullProgress({ stage: 'delete', totalItems: 3 }))
             .toBe('Deleting 3 items');
     });
 
-    it('shows manual sync controls but keeps automatic sync disabled', () => {
+    it('shows manual and automatic Drive v2 sync controls', () => {
         expect(driveV2Visibility()).toEqual({
             push: true,
             pull: true,
             status: true,
-            autoSync: false,
+            autoSync: true,
         });
+    });
+
+    it('recognizes expired Google authorization as reconnect-and-resume', () => {
+        expect(isDriveReconnectRequired(new DriveAuthError())).toBe(true);
+        expect(isDriveReconnectRequired(new Error('ordinary failure'))).toBe(false);
     });
 });

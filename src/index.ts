@@ -1,6 +1,6 @@
 import './style.css';
 import { HttpStorageAdapter } from './backend/http';
-import { requireRuntime } from './backend/runtime';
+import { requireDriveV2Runtime, requireRuntime } from './backend/runtime';
 import { DriveClient, type DriveFileMeta } from './backend/drive/client';
 import { DriveUploadPausedError } from './backend/drive/pack-uploader';
 import { GisTokenProvider, getSharedGisTokenProvider } from './backend/drive/oauth';
@@ -16,8 +16,13 @@ import {
     resetDriveRootToV2,
 } from './backend/drive/pack-layout';
 import { prepareDriveRootKeyTransition } from './backend/drive/root-key-transition';
-import { canResetDriveV2, driveV2Visibility } from './backend/drive/drive-v2-ui-state';
+import {
+    canResetDriveV2,
+    driveV2Visibility,
+    isDriveReconnectRequired,
+} from './backend/drive/drive-v2-ui-state';
 import { collectGarbage } from './backend/drive/gc';
+import { collectDriveV2Garbage } from './backend/drive/gc-v2';
 import { encodeSalt } from './crypto';
 import { driveSaltFromFolderIdAsync } from './crypto/subkeys';
 import {
@@ -145,7 +150,7 @@ function updateBackendFieldsVisibility(): void {
     const isDriveV2 = isDrive && s.driveRootVersion === 2;
     $('#tavernsync_drive_fields').toggle(isDrive);
     $('#tavernsync_http_fields').toggle(!isDrive);
-    $('#tavernsync_gc').toggle(isDrive && !isDriveV2);
+    $('#tavernsync_gc').toggle(isDrive);
     $('#tavernsync_reset_drive_v2').toggle(isDrive);
     const v2Visibility = driveV2Visibility();
     $('#tavernsync_push').toggle(!isDriveV2 || v2Visibility.push);
@@ -412,10 +417,6 @@ async function handleDriveDisconnect(): Promise<void> {
 async function handleDriveGc(): Promise<void> {
     const s = getSettings();
     if (s.backendMode !== 'drive') return;
-    if (s.driveRootVersion === 2) {
-        toastr.info('Drive v2 orphan cleanup ยังไม่เปิดใน Phase 1', 'TavernSync');
-        return;
-    }
     if (!s.driveClientId.trim() || !s.driveFolderId.trim()) {
         toastr.warning('Connect Google ก่อน แล้วค่อย clean up', 'TavernSync');
         return;
@@ -428,12 +429,17 @@ async function handleDriveGc(): Promise<void> {
     if (!ok) return;
     try {
         const res = await withLoader('Cleaning up old data on Drive…', async () => {
-            const rt = await requireRuntime();
             const client = makeDriveClient();
+            if (s.driveRootVersion === 2) {
+                const runtime = await requireDriveV2Runtime();
+                return collectDriveV2Garbage(runtime.store, client);
+            }
+            const rt = await requireRuntime();
             const layout = await discoverDriveLayout(client, s.driveFolderId.trim());
-            return collectGarbage(client, rt.storage as DriveAdapter, layout, rt.crypto);
+            const result = await collectGarbage(client, rt.storage as DriveAdapter, layout, rt.crypto);
+            return { trashedPacks: result.trashedBlobs, trashedCommits: result.trashedCommits };
         });
-        toastr.success(`Clean up เสร็จ — trash ${res.trashedBlobs} blobs + ${res.trashedCommits} commits`, 'TavernSync');
+        toastr.success(`Clean up เสร็จ — trash ${res.trashedPacks} packs/blobs + ${res.trashedCommits} commits`, 'TavernSync');
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Clean up failed: ${String(e)}`, 'TavernSync');
@@ -582,6 +588,13 @@ async function handlePull(): Promise<void> {
         }
     } catch (e) { // no-excuse-ok: catch -- top-level UI boundary converts restore failures into explicit user choices/toasts.
         console.error(LOG_PREFIX, e);
+        if (isDriveReconnectRequired(e)) {
+            toastr.warning(
+                'Google connection expired — Connect Google แล้วกด Pull อีกครั้ง ระบบจะทำต่อจาก checkpoint',
+                'TavernSync',
+            );
+            return;
+        }
         toastr.error(`Pull failed: ${String(e)}`, 'TavernSync');
     }
 }
@@ -722,21 +735,11 @@ function bindSettingsHandlers(): void {
     bindScopeCheckbox('#tavernsync_scope_themes', 'themes');
 
     $(document).on('change', '#tavernsync_auto_startup', (e: { target: HTMLInputElement }) => {
-        if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
-            $(e.target).prop('checked', false);
-            toastr.info('Drive v2 ใช้ Push/Pull แบบเลือก snapshot ด้วยตนเอง จึงไม่เปิด auto-sync', 'TavernSync');
-            return;
-        }
         getSettings().autoSyncOnStartup = !!$(e.target).prop('checked');
         saveSettings();
     });
 
     $(document).on('change', '#tavernsync_auto_chat_close', (e: { target: HTMLInputElement }) => {
-        if (getSettings().backendMode === 'drive' && getSettings().driveRootVersion === 2) {
-            $(e.target).prop('checked', false);
-            toastr.info('Drive v2 ใช้ Push/Pull แบบเลือก snapshot ด้วยตนเอง จึงไม่เปิด auto-sync', 'TavernSync');
-            return;
-        }
         getSettings().autoSyncOnChatClose = !!$(e.target).prop('checked');
         saveSettings();
     });
@@ -895,8 +898,7 @@ function registerEventListeners(): void {
         console.log(LOG_PREFIX, 'APP_READY');
         // Defer auto-sync — never block hooks (5s timeout)
         const startupSettings = getSettings();
-        if (startupSettings.autoSyncOnStartup
-            && !(startupSettings.backendMode === 'drive' && startupSettings.driveRootVersion === 2)) {
+        if (startupSettings.autoSyncOnStartup) {
             setTimeout(() => {
                 void (async () => {
                     try {
@@ -934,14 +936,17 @@ function registerEventListeners(): void {
     eventSource.on(chatChanged, () => {
         const s = getSettings();
         if (!s.autoSyncOnChatClose) return;
-        if (s.backendMode === 'drive' && s.driveRootVersion === 2) return;
         const next = String((ctx as { chatId?: string }).chatId ?? '');
         if (prevChat && prevChat !== next) {
             setTimeout(() => {
                 void (async () => {
                     try {
                         if (!(await ensureE2eeReady())) return;
-                        await runSync({ direction: 'push', onProgress: (m) => setStatusLine(m) });
+                        await runSync({
+                            direction: 'push',
+                            onProgress: (m) => setStatusLine(m),
+                            chooseDriveV2Source: promptDriveV2SourceChoice,
+                        });
                     } catch (e) {
                         console.error(LOG_PREFIX, 'auto-push on chat close failed', e);
                     }

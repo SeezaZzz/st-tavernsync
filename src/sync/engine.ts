@@ -22,6 +22,7 @@ import { DriveRangeSource } from '../backend/drive/range-source';
 import { getSharedGisTokenProvider } from '../backend/drive/oauth';
 import type { DrivePackManifestV2 } from '../backend/drive/pack-types';
 import { DriveV2PullCheckpoint } from '../backend/drive/pull-checkpoint';
+import { formatDriveV2PullProgress } from '../backend/drive/drive-v2-ui-state';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
 import { LOG_PREFIX, getSettings, saveSettings, type SyncScopeSettings } from '../settings';
@@ -561,10 +562,7 @@ async function runDriveV2ExtensionPull(options: {
             commitId,
             syncedAt: Date.now(),
         }),
-        onProgress: event => options.onProgress?.(
-            `Restoring ${event.completedItems}/${event.totalItems} · `
-            + `${event.itemsPerSecond.toFixed(1)} items/s · ${event.activeWriters} writers`,
-        ),
+        onProgress: event => options.onProgress?.(formatDriveV2PullProgress(event)),
     });
 }
 

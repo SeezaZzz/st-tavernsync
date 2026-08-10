@@ -1,3 +1,5 @@
+import { DriveAuthError } from './client';
+
 export interface DriveV2UploadProgressEvent {
     stage: 'upload';
     completedPacks: number;
@@ -19,6 +21,9 @@ export type DriveV2PullProgressEvent =
         completedItems: number;
         totalItems: number;
         itemType: string;
+        itemsPerSecond: number;
+        activeWriters: number;
+        etaSeconds: number;
     }
     | {
         stage: 'delete';
@@ -35,9 +40,14 @@ export function driveV2Visibility(): {
     readonly push: true;
     readonly pull: true;
     readonly status: true;
-    readonly autoSync: false;
+    readonly autoSync: true;
 } {
-    return { push: true, pull: true, status: true, autoSync: false };
+    return { push: true, pull: true, status: true, autoSync: true };
+}
+
+export function isDriveReconnectRequired(error: unknown): boolean {
+    return error instanceof DriveAuthError
+        || (error instanceof Error && error.name === 'DriveAuthError');
 }
 
 function formatEta(seconds: number): string {
@@ -59,7 +69,9 @@ export function formatDriveV2PullProgress(event: DriveV2PullProgressEvent): stri
             return `Downloading packs ${event.completedPacks}/${event.totalPacks} · ${mbps.toFixed(1)} MB/s · ETA ${formatEta(event.etaSeconds)}`;
         }
         case 'apply':
-            return `Applying ${event.completedItems}/${event.totalItems} · ${event.itemType}`;
+            return `Restoring ${event.completedItems}/${event.totalItems} · `
+                + `${event.itemsPerSecond.toFixed(1)} items/s · ${event.activeWriters} writers · `
+                + `ETA ${formatEta(event.etaSeconds)}`;
         case 'delete':
             return `Deleting ${event.totalItems} items`;
     }
