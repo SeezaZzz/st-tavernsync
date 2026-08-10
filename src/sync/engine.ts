@@ -20,6 +20,7 @@ import {
 import { computeDriveV2Heads, type DriveV2CommitMeta } from '../backend/drive/drive-v2-head';
 import type { DrivePackManifestV2 } from '../backend/drive/pack-types';
 import { DriveV2PullCheckpoint } from '../backend/drive/pull-checkpoint';
+import type { PullPerformanceProfile } from '../backend/drive/pull-performance-profile';
 import { formatDriveV2PullProgress } from '../backend/drive/drive-v2-ui-state';
 import { decodeSalt, deriveKey, encodeSalt, exportKeyRaw, importAesKey } from '../crypto';
 import { driveSaltFromFolderIdAsync } from '../crypto/subkeys';
@@ -561,6 +562,7 @@ export interface SyncRunOptions {
     /** @deprecated prefer resolveConflicts */
     resolveConflict?: (entry: DiffEntry) => Promise<ConflictChoice>;
     chooseDriveV2Source?: (input: import('../backend/drive/drive-v2-choice').DriveV2ChoiceInput) => Promise<DriveV2SourceChoice>;
+    pullPerformanceProfile?: PullPerformanceProfile;
 }
 
 export class DriveV2SourceChoiceRequiredError extends Error {
@@ -578,6 +580,7 @@ async function runDriveV2ExtensionPull(options: {
     commit: DriveV2CommitMeta;
     manifest: DrivePackManifestV2;
     onProgress?: (message: string) => void;
+    pullPerformanceProfile?: PullPerformanceProfile;
 }): Promise<DriveV2PullResult> {
     options.onProgress?.('Checking local data…');
     const scanned = await scanLocal({
@@ -593,6 +596,7 @@ async function runDriveV2ExtensionPull(options: {
     const preparedPersonas: PreparedPersona[] = [];
 
     return runDriveV2Pull({
+        profile: options.pullPerformanceProfile,
         commit: options.commit,
         manifest: options.manifest,
         localInventory,
@@ -644,6 +648,7 @@ async function runDriveV2FromEngine(options: {
     typeFilter?: ReadonlySet<string>;
     chooseSource?: SyncRunOptions['chooseDriveV2Source'];
     onProgress?: (message: string) => void;
+    pullPerformanceProfile?: PullPerformanceProfile;
 }): Promise<{ message: string }> {
     if (options.direction === 'pull') return runDriveV2FastPullFromEngine(options);
     const settings = getSettings();
@@ -699,6 +704,7 @@ async function runDriveV2FromEngine(options: {
                 commit,
                 manifest,
                 onProgress: options.onProgress,
+                pullPerformanceProfile: options.pullPerformanceProfile,
             });
         },
     });
@@ -723,6 +729,7 @@ async function runDriveV2FastPullFromEngine(options: {
     typeFilter?: ReadonlySet<string>;
     chooseSource?: SyncRunOptions['chooseDriveV2Source'];
     onProgress?: (message: string) => void;
+    pullPerformanceProfile?: PullPerformanceProfile;
 }): Promise<{ message: string }> {
     const settings = getSettings();
     const runtime = await requireDriveV2Runtime();
@@ -756,6 +763,7 @@ async function runDriveV2FastPullFromEngine(options: {
                 commit,
                 manifest,
                 onProgress: options.onProgress,
+                pullPerformanceProfile: options.pullPerformanceProfile,
             });
         },
     });
@@ -848,6 +856,7 @@ export async function runSync(opts: SyncRunOptions): Promise<{ message: string }
             typeFilter: opts.typeFilter,
             chooseSource: opts.chooseDriveV2Source,
             onProgress: opts.onProgress,
+            pullPerformanceProfile: opts.pullPerformanceProfile,
         });
     }
     const rt = await requireRuntime();

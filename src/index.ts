@@ -56,6 +56,18 @@ import {
 import { PullCrashJournal, formatInterruptedPull } from './sync/pull-crash-journal';
 import { promptConflicts } from './ui/conflict';
 import { promptDriveV2SourceChoice } from './ui/drive-v2-source-choice';
+import {
+    createPullPerformanceStore,
+    recommendPullPerformanceProfile,
+    type PullPerformanceProfile,
+} from './backend/drive/pull-performance-profile';
+import { isTransientPullError } from './backend/drive/pull-stage-error';
+import {
+    promptPullPerformanceChoice,
+    promptPullPerformanceFallback,
+} from './ui/pull-performance-choice';
+
+const pullPerformanceStore = createPullPerformanceStore();
 
 function getCtx() {
     return SillyTavern.getContext();
@@ -196,6 +208,9 @@ function hydrateSettingsUI(): void {
     $('#tavernsync_propagate_deletes').prop('checked', s.propagateDeletes);
     $('#tavernsync_e2ee').prop('checked', s.e2eeEnabled);
     $('#tavernsync_e2ee_session').prop('checked', s.e2eeRequireSessionUnlock);
+    $('#tavernsync_pull_performance').val(
+        pullPerformanceStore.load() ?? recommendPullPerformanceProfile(),
+    );
 
     setStatusLine(
         s.lastItemCount
@@ -607,27 +622,67 @@ async function handlePush(): Promise<void> {
     }
 }
 
-async function handlePull(): Promise<void> {
-    if (!(await ensureE2eeReady('pull'))) return;
-    const execute = () => withLoader('Pulling…', () =>
+function offerFastPullReload(restoredMessage: string): void {
+    if (restoredMessage.startsWith('Fast Pull complete') && window.confirm(
+        'Fast Pull restored the complete Google Drive backup.\n\nReload now so SillyTavern reads every updated item?',
+    )) {
+        location.reload();
+    }
+}
+
+async function handlePull(interactive = true): Promise<void> {
+    if (!(await ensureE2eeReady('pull', interactive))) return;
+    let profile = pullPerformanceStore.load();
+    if (!profile) {
+        if (interactive) {
+            const choice = await promptPullPerformanceChoice(recommendPullPerformanceProfile());
+            if (!choice) return;
+            profile = choice.profile;
+            if (choice.remember) pullPerformanceStore.save(profile);
+            $('#tavernsync_pull_performance').val(profile);
+        } else {
+            profile = recommendPullPerformanceProfile();
+        }
+    }
+    const execute = (selected: PullPerformanceProfile) => withLoader('Pulling…', () =>
         runSync({
             direction: 'pull',
+            pullPerformanceProfile: selected,
             onProgress: (m) => setStatusLine(m),
             resolveConflicts: (entries, direction) => promptConflicts(entries, direction),
             chooseDriveV2Source: promptDriveV2SourceChoice,
         }),
     );
     try {
-        const { message } = await execute();
+        const { message } = await execute(profile);
         setStatusLine(message);
         toastr.success(message, 'TavernSync pull');
-        if (message.startsWith('Fast Pull complete') && window.confirm(
-            'Fast Pull restored the complete Google Drive backup.\n\nReload now so SillyTavern reads every updated item?',
-        )) {
-            location.reload();
-        }
+        offerFastPullReload(message);
     } catch (e) { // no-excuse-ok: catch -- top-level UI boundary converts restore failures into explicit user choices/toasts.
         console.error(LOG_PREFIX, e);
+        if (profile === 'pc' && isTransientPullError(e)) {
+            const fallback = await promptPullPerformanceFallback();
+            if (fallback !== 'mobile') {
+                if (fallback === 'pc') {
+                    pullPerformanceStore.save('pc');
+                    $('#tavernsync_pull_performance').val('pc');
+                }
+                return;
+            }
+            pullPerformanceStore.save('mobile');
+            $('#tavernsync_pull_performance').val('mobile');
+            toastr.info('Switch to Mobile / Stable and resume', 'TavernSync');
+            try {
+                const { message } = await execute('mobile');
+                setStatusLine(message);
+                toastr.success(message, 'TavernSync pull');
+                offerFastPullReload(message);
+            } catch (retryError) {
+                console.error(LOG_PREFIX, retryError);
+                toastr.error(`Pull failed: ${String(retryError)}`, 'TavernSync');
+            }
+            return;
+        }
         if (isDriveReconnectRequired(e)) {
             toastr.warning(
                 'Google connection expired — Connect Google แล้วกด Pull อีกครั้ง ระบบจะทำต่อจาก checkpoint',
@@ -783,6 +838,11 @@ function bindSettingsHandlers(): void {
         saveSettings();
     });
 
+    $(document).on('change', '#tavernsync_pull_performance', (e: { target: HTMLSelectElement }) => {
+        const value = String($(e.target).val());
+        if (value === 'mobile' || value === 'pc') pullPerformanceStore.save(value);
+    });
+
     $(document).on('change', '#tavernsync_auto_chat_close', (e: { target: HTMLInputElement }) => {
         getSettings().autoSyncOnChatClose = !!$(e.target).prop('checked');
         saveSettings();
@@ -915,7 +975,7 @@ function registerSlashCommands(): void {
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'sync-pull',
         aliases: ['tavernsync-pull'],
-        callback: async () => { await handlePull(); return ''; },
+        callback: async () => { await handlePull(false); return ''; },
         helpString: 'Pull remote TavernSync state into this install.',
         namedArgumentList: [],
         unnamedArgumentList: [],
@@ -949,7 +1009,11 @@ function registerEventListeners(): void {
                 void (async () => {
                     try {
                         if (!(await ensureE2eeReady('pull', false))) return;
-                        await runSync({ direction: 'pull', onProgress: (m) => setStatusLine(m) });
+                        await runSync({
+                            direction: 'pull',
+                            pullPerformanceProfile: pullPerformanceStore.load() ?? recommendPullPerformanceProfile(),
+                            onProgress: (m) => setStatusLine(m),
+                        });
                         toastr.info('Auto-pull on startup finished.', 'TavernSync');
                     } catch (e) {
                         console.error(LOG_PREFIX, 'auto-pull failed', e);

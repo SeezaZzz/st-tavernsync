@@ -1,6 +1,7 @@
 import { sha256Hex } from '../../st-adapter/normalize';
 import type { DrivePackCrypto } from './pack-crypto';
 import type { DrivePackItemV2 } from './pack-types';
+import { withPullStage } from './pull-stage-error';
 
 export interface DriveV2PackSource {
     readPack(name: string): Promise<Uint8Array>;
@@ -51,7 +52,10 @@ export class DriveV2PackReader {
                     throw new RangeError('chunk range outside pack');
                 }
 
-                plain = await this.crypto.decryptChunk(pack.bytes.subarray(ref.offset, end));
+                plain = await withPullStage(
+                    'decrypt', 'LOCAL', `pack://${ref.packName}`,
+                    () => this.crypto.decryptChunk(pack.bytes.subarray(ref.offset, end)),
+                );
                 if (
                     plain.byteLength !== ref.plainLength
                     || await sha256Hex(plain) !== ref.chunkHash
@@ -173,7 +177,10 @@ export class DriveV2PackReader {
         for (let attempt = 0; attempt < 3; attempt += 1) {
             this.packDownloadRequestCount += 1;
             try {
-                return await this.source.readPack(name);
+                return await withPullStage(
+                    'pack-download', 'GET', `drive-pack://${name}`,
+                    () => this.source.readPack(name),
+                );
             } catch (error) {
                 lastError = error;
             }

@@ -1,4 +1,5 @@
 import { DriveAuthError } from './client';
+import type { PullPerformanceProfile } from './pull-performance-profile';
 
 export interface DriveV2UploadProgressEvent {
     stage: 'upload';
@@ -18,6 +19,7 @@ export type DriveV2PullProgressEvent =
     }
     | {
         stage: 'apply';
+        profile: PullPerformanceProfile;
         completedItems: number;
         totalItems: number;
         itemType: string;
@@ -73,6 +75,7 @@ export function formatDriveV2PullProgress(event: DriveV2PullProgressEvent): stri
         }
         case 'apply':
             return `Packs ${event.downloadedPacks}/${event.uniquePacksRequired} · `
+                + `${event.profile === 'mobile' ? 'Mobile / Stable' : 'PC / Fast'} · `
                 + `Restoring ${event.completedItems}/${event.totalItems} · `
                 + `${event.itemsPerSecond.toFixed(1)} items/s · ${event.activeWriters} writers · `
                 + `ETA ${formatEta(event.etaSeconds)}`;

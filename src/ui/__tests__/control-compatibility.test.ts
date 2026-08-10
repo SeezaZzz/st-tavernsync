@@ -21,9 +21,16 @@ it('keeps every approved control in the panel', () => {
         'tavernsync_gc',
         'tavernsync_reset_drive_v2',
         'tavernsync_resume_drive_v2_push',
+        'tavernsync_pull_performance',
     ]) {
         expect(html).toContain(`id="${id}"`);
     }
+});
+
+it('keeps Pull performance inside Advanced', () => {
+    const html = readFileSync(new URL('../../../panel.html', import.meta.url), 'utf8');
+    expect(html.indexOf('id="tavernsync_pull_performance"'))
+        .toBeGreaterThan(html.indexOf('<b>Advanced</b>'));
 });
 
 it('keeps destructive Drive maintenance controls inside Advanced with readable widths', () => {
@@ -63,7 +70,7 @@ it('routes each manual Drive action through storage activation', () => {
     const source = readFileSync(new URL('../../index.ts', import.meta.url), 'utf8');
 
     expect(source).toContain("ensureE2eeReady('push')");
-    expect(source).toContain("ensureE2eeReady('pull')");
+    expect(source).toContain("ensureE2eeReady('pull', interactive)");
     expect(source).toContain("ensureE2eeReady('status')");
     expect(source).toContain('activateDriveStorage({');
 });

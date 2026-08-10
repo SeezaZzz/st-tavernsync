@@ -135,4 +135,44 @@ describe('adaptive rolling pull queue', () => {
         await expect(runAdaptivePullQueue({ jobs: cyclic, async run() {} }))
             .rejects.toThrow(/dependency deadlock/i);
     });
+
+    it('never exceeds an aggregate writer cap across cost classes', async () => {
+        let active = 0;
+        let peak = 0;
+        await runAdaptivePullQueue({
+            jobs: jobs([
+                ...Array.from({ length: 8 }, (_, i) => `preset/${i}`),
+                ...Array.from({ length: 8 }, (_, i) => `chat/X.png/${i}`),
+                ...Array.from({ length: 4 }, (_, i) => `character/C${i}.png`),
+            ]),
+            aggregateLimit: 4,
+            async run() {
+                active += 1;
+                peak = Math.max(peak, active);
+                await Promise.resolve();
+                active -= 1;
+            },
+        });
+        expect(peak).toBeLessThanOrEqual(4);
+    });
+
+    it('retries transient work while stepping the aggregate cap down', async () => {
+        let attempts = 0;
+        const snapshots: AdaptivePullSnapshot[] = [];
+        await runAdaptivePullQueue({
+            jobs: jobs(['preset/retry']),
+            aggregateLimit: 4,
+            minimumAggregateLimit: 2,
+            transientRetries: 2,
+            isTransientError: error => error instanceof TypeError,
+            retryDelay: async () => {},
+            async run() {
+                attempts += 1;
+                if (attempts === 1) throw new TypeError('Load failed');
+            },
+            onSnapshot: value => snapshots.push(value),
+        });
+        expect(attempts).toBe(2);
+        expect(snapshots.at(-1)?.aggregateLimit).toBe(3);
+    });
 });

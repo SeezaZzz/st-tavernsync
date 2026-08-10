@@ -16,6 +16,7 @@ export interface AdaptivePullSnapshot {
     readonly activeWriters: number;
     readonly etaSeconds: number;
     readonly limits: Record<PullCostClass, number>;
+    readonly aggregateLimit: number;
 }
 
 export interface AdaptivePullMetrics {
@@ -24,7 +25,7 @@ export interface AdaptivePullMetrics {
     readonly elapsedMs: number;
 }
 
-interface PullLimits {
+export interface PullLimits {
     readonly initial: Record<PullCostClass, number>;
     readonly minimum: Record<PullCostClass, number>;
     readonly maximum: Record<PullCostClass, number>;
@@ -36,6 +37,11 @@ export interface AdaptivePullQueueOptions {
     readonly signal?: AbortSignal;
     readonly now?: () => number;
     readonly limits?: PullLimits;
+    readonly aggregateLimit?: number;
+    readonly minimumAggregateLimit?: number;
+    readonly transientRetries?: number;
+    readonly isTransientError?: (error: unknown) => boolean;
+    readonly retryDelay?: (attempt: number) => Promise<void>;
     readonly onSnapshot?: (snapshot: AdaptivePullSnapshot) => void;
 }
 
@@ -113,6 +119,10 @@ export function runAdaptivePullQueue(
     let completed = 0;
     let active = 0;
     let maxActiveWriters = 0;
+    let aggregateLimit = options.aggregateLimit ?? Number.MAX_SAFE_INTEGER;
+    const minimumAggregateLimit = options.minimumAggregateLimit ?? aggregateLimit;
+    const transientRetries = options.transientRetries ?? 0;
+    const attempts = new Map<string, number>();
     let settled = false;
 
     return new Promise((resolve, reject) => {
@@ -147,7 +157,7 @@ export function runAdaptivePullQueue(
             for (let index = 0; index < pending.length;) {
                 const job = pending[index];
                 const ready = job.dependencies.every(id => completedIds.has(id));
-                if (!ready || activeByClass[job.cost] >= limits[job.cost]) {
+                if (!ready || active >= aggregateLimit || activeByClass[job.cost] >= limits[job.cost]) {
                     index += 1;
                     continue;
                 }
@@ -177,8 +187,17 @@ export function runAdaptivePullQueue(
                             ? (options.jobs.length - completed) / itemsPerSecond
                             : 0,
                         limits: { ...limits },
+                        aggregateLimit,
                     });
-                }, error => {
+                }, async error => {
+                    const attempt = attempts.get(job.item.id) ?? 0;
+                    if (attempt < transientRetries && options.isTransientError?.(error)) {
+                        attempts.set(job.item.id, attempt + 1);
+                        aggregateLimit = Math.max(minimumAggregateLimit, aggregateLimit - 1);
+                        await options.retryDelay?.(attempt + 1);
+                        pending.unshift(job);
+                        return;
+                    }
                     limits[job.cost] = Math.max(bounds.minimum[job.cost], limits[job.cost] - 1);
                     fail(error);
                 }).finally(() => {

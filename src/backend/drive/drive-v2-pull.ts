@@ -9,6 +9,11 @@ import type { DrivePackCrypto } from './pack-crypto';
 import { DriveV2PackReader, type DriveV2PackSource } from './pack-reader';
 import type { DrivePackManifestV2 } from './pack-types';
 import type { DriveV2PullCheckpoint } from './pull-checkpoint';
+import {
+    getPullPerformanceConfig,
+    type PullPerformanceProfile,
+} from './pull-performance-profile';
+import { isTransientPullError, withPullStage } from './pull-stage-error';
 
 const DEFAULT_ENCRYPTED_BUDGET = 64 * 1024 * 1024;
 const DEFAULT_PLAINTEXT_BUDGET = 48 * 1024 * 1024;
@@ -20,6 +25,7 @@ function isSelfExtension(id: string): boolean {
 
 export interface DriveV2PullProgressEvent {
     readonly stage: 'apply';
+    readonly profile: PullPerformanceProfile;
     readonly completedItems: number;
     readonly totalItems: number;
     readonly itemType: string;
@@ -32,6 +38,7 @@ export interface DriveV2PullProgressEvent {
 }
 
 export interface DriveV2PullOptions {
+    readonly profile?: PullPerformanceProfile;
     readonly commit: DriveV2CommitMeta;
     readonly manifest: DrivePackManifestV2;
     readonly localInventory: ReadonlyMap<string, ItemType>;
@@ -66,8 +73,14 @@ export interface DriveV2PullResult {
 }
 
 export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<DriveV2PullResult> {
-    const encryptedBudget = options.encryptedBudget ?? new ByteBudget(DEFAULT_ENCRYPTED_BUDGET);
-    const plaintextBudget = options.plaintextBudget ?? new ByteBudget(DEFAULT_PLAINTEXT_BUDGET);
+    const profile = options.profile ?? 'pc';
+    const config = getPullPerformanceConfig(profile);
+    const encryptedBudget = options.encryptedBudget ?? new ByteBudget(
+        profile === 'pc' ? DEFAULT_ENCRYPTED_BUDGET : config.encryptedBudgetBytes,
+    );
+    const plaintextBudget = options.plaintextBudget ?? new ByteBudget(
+        profile === 'pc' ? DEFAULT_PLAINTEXT_BUDGET : config.plaintextBudgetBytes,
+    );
     const packCacheSlots = Math.max(1, Math.min(
         2,
         Math.floor(encryptedBudget.capacityBytes / Math.max(1, options.manifest.packBytes)),
@@ -121,6 +134,12 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
         const metrics = await runAdaptivePullQueue({
             jobs,
             signal: options.signal,
+            limits: config.limits,
+            aggregateLimit: config.aggregateCap,
+            minimumAggregateLimit: config.minimumAggregateCap,
+            transientRetries: config.transientRetries,
+            isTransientError: isTransientPullError,
+            retryDelay: attempt => new Promise(resolve => setTimeout(resolve, 250 * (2 ** (attempt - 1)))),
             async run(job) {
                 const plainPermit = await plaintextBudget.acquire(
                     Math.max(1, job.item.size),
@@ -130,7 +149,10 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
                 try {
                     options.signal?.throwIfAborted();
                     bytes = await packReader.readItem(job.item);
-                    await options.applyItem(job.item.id, job.item.type, bytes);
+                    await withPullStage(
+                        'local-write', 'POST', `st-item://${job.item.id}`,
+                        () => options.applyItem(job.item.id, job.item.type, bytes!),
+                    );
                     options.checkpoint.markCompleted(job.item.id);
                 } finally {
                     bytes?.fill(0);
@@ -139,6 +161,7 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
             },
             onSnapshot: snapshot => options.onProgress?.({
                 stage: 'apply',
+                profile,
                 completedItems: skippedIds.size + snapshot.completed,
                 totalItems: remote.length,
                 itemType: snapshot.lastItemType,
