@@ -71,6 +71,45 @@ It must not require or silently install:
 The same TavernSync extension must work on desktop SillyTavern, Android-hosted
 SillyTavern, SillyiOS, and browsers connected to a remote SillyTavern backend.
 
+### 3.1 Automatic Google Drive Storage Resolution
+
+Storage schema versions, Drive Root IDs, packs, blobs, and manifests are
+implementation details. Public UI, normal status messages, and recovery copy
+must not require users to recognize or choose any of them.
+
+The extension resolves Google Drive storage as follows:
+
+1. Connect Google and list every app-created current-format TavernSync storage
+   candidate. A remembered Drive folder ID is a cache hint, not authority.
+2. If a remembered candidate still exists and its remembered key opens its
+   newest authenticated manifest, keep it without additional discovery work.
+3. Otherwise, after the user supplies the Encryption passphrase, derive the
+   candidate-specific key from that passphrase and candidate Root ID, then try
+   to authenticate the candidate's newest encrypted manifest.
+4. If exactly one candidate authenticates, select it and remember its Root ID.
+   If multiple candidates authenticate with the same passphrase, select the
+   candidate containing the newest committed snapshot by Drive server time and
+   deterministic file-ID tie-breaker.
+5. If candidates contain committed snapshots but none authenticate, report
+   `Encryption passphrase is incorrect` and perform no local or remote write.
+6. Pull never creates storage. With no current-format storage, it reports that
+   no backup exists.
+7. Push may create one current-format storage area only after the user presses
+   Push and no current-format candidates exist. Discovery, Connect, Unlock,
+   Check Status, and Pull must never create storage silently.
+8. An explicitly remembered empty storage area may be reused. Ambiguous empty
+   candidates require an Advanced recovery action; they must not be selected by
+   guessing.
+
+The internal current-format marker is used only to enumerate candidates. The
+extension must not publish a stable plaintext tag derived from the Encryption
+passphrase. The passphrase proves access by authenticating ciphertext; it is
+not exposed as a Drive search address.
+
+Legacy storage is never selected or created by the public path. Legacy support
+may remain internally for cleanup or controlled development migration, but no
+public control asks users to choose a schema version.
+
 ## 4. Extension-Only Pull Architecture
 
 The existing pack format remains unchanged: logical SillyTavern items are
@@ -209,7 +248,7 @@ recovery controls. Preserve the current controls and their safety boundaries:
 - Reset sync on this device;
 - Wipe remote sync data;
 - Clean up old Drive data;
-- Reset to empty Drive v2 Root;
+- Start fresh Google Drive storage;
 - Resume Push.
 
 The basic section shows only the normal path:
@@ -230,9 +269,11 @@ Maintenance actions remain distinct:
   confirmation and must never delete the active head.
 - **Wipe remote sync data** clears remote sync state, never local SillyTavern
   files.
-- **Reset to empty Drive v2 Root** moves the current Root to Drive Trash and
-  creates an empty Root. It does not permanently empty Drive Trash or delete
-  local SillyTavern data.
+- **Start fresh Google Drive storage** moves the current storage area to Drive
+  Trash and creates an empty current-format storage area. It does not
+  permanently empty Drive Trash or delete local SillyTavern data. The existing
+  internal DOM ID may remain for compatibility, but user-facing copy must not
+  mention Root or a schema version.
 
 HTTP/OG behavior and controls remain unchanged.
 
@@ -246,6 +287,15 @@ Downloading 412/2347 · 18.2 MB/s
 Restoring 724/2347 · 14.6 items/s · 12 writers · ETA 01:51
 Deleting 3 obsolete items
 Pull complete · 154s
+```
+
+Normal user-facing status describes backups and item counts, never pack/blob
+counts or schema versions. For example:
+
+```text
+Connected to Google Drive
+Backup ready · 2,347 items
+No backup yet · Push this device to create one
 ```
 
 The diagnostic log records commit ID, item type, item size, queue class,
@@ -278,6 +328,12 @@ Pull still uses existing per-item SillyTavern write endpoints.
 Automated coverage must include:
 
 - newest committed snapshot selection and deterministic ties;
+- current-format candidate enumeration without legacy fallback;
+- remembered Root reuse only while it remains valid;
+- passphrase-authenticated selection across one or multiple candidates;
+- no storage creation during Connect, Unlock, Pull, or Check Status;
+- first Push creates storage only when no current-format candidate exists;
+- public UI and errors contain no schema, Root, pack, blob, or manifest jargon;
 - Pull never invokes full local content scan, content diff, merge, or source
   chooser;
 - stale Push shows Drive/local/cancel and honors the selected source;

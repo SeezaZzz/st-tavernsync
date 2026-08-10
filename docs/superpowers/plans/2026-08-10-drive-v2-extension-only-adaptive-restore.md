@@ -1,10 +1,12 @@
 # Drive v2 Extension-Only Adaptive Restore Implementation Plan
 
+> **MANDATORY ACTIVE EXECUTION LOCK:** Before every implementation or live-test block, read [`../ACTIVE-drive-v2-correctness-lock.md`](../ACTIVE-drive-v2-correctness-lock.md). It records the owner-corrected OG reference, complete scope contract, pack-centric Pull architecture, and acceptance gates. Where this older plan conflicts with that lock (especially per-item range reads), the active lock controls.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Drive v2 Core/fixed-batch Pull with an extension-only, bounded-memory rolling restore that always Pulls the newest committed Drive snapshot, resumes after interruption, propagates deletions last, and preserves every existing sync and maintenance control.
 
-**Architecture:** Keep encrypted-pack Push and HTTP/OG unchanged. Drive v2 Pull resolves the newest manifest, builds a lightweight local ID inventory, range-downloads and verifies one item at a time under encrypted/plaintext byte budgets, then feeds cost-aware rolling writers backed by existing SillyTavern APIs. Checkpoints persist in extension settings; deletions and base advancement occur only after all writes succeed.
+**Architecture:** Keep the encrypted-pack format and HTTP/OG backend unchanged. Complete the shared selected-scope scanner, then make Drive v2 Pull download each required pack once into a bounded one-to-two-pack pipeline, authenticate/decrypt its chunks, and feed continuously available verified items to bounded SillyTavern writers. Checkpoints persist in extension settings; post-restore inventory verification, deletions, and base advancement occur only after all writes succeed.
 
 **Tech Stack:** TypeScript 5.8, Vitest 3, Web Crypto, Google Drive REST range requests, SillyTavern extension APIs, jQuery UI, Webpack 5.
 
@@ -1533,7 +1535,221 @@ git commit -m "feat(drive): preserve adaptive sync controls"
 
 ---
 
-### Task 10: End-to-End Fault Matrix, Benchmark, and Release Gate
+### Task 10: Resolve Encrypted Storage Automatically and Remove Schema Jargon
+
+**Files:**
+- Create: `src/backend/drive/root-resolver.ts`
+- Create: `src/backend/drive/__tests__/root-resolver.test.ts`
+- Modify: `src/backend/drive/pack-layout.ts`
+- Modify: `src/backend/drive/__tests__/pack-layout.test.ts`
+- Modify: `src/backend/drive/connect-layout.ts`
+- Modify: `src/backend/drive/__tests__/connect-layout.test.ts`
+- Modify: `src/settings.ts`
+- Modify: `src/index.ts`
+- Modify: `panel.html`
+- Modify: `src/ui/__tests__/control-compatibility.test.ts`
+
+**Interfaces:**
+- `listExistingDrivePackLayouts(client): Promise<DrivePackLayout[]>` enumerates every complete current-format candidate without creating storage.
+- `resolveDriveStorageByPassphrase(options): Promise<DriveStorageResolution>` authenticates encrypted manifests with `passphrase + rootId` and selects the candidate containing the newest valid committed snapshot.
+- Connect is read-only with respect to Drive storage. Pull and Check Status never create storage. Push creates one current-format storage area only when candidate enumeration returned zero.
+- Internal DOM IDs may retain `drive_v2` for compatibility; visible strings must not expose v1/v2, Root, pack, blob, or manifest terminology.
+
+- [ ] **Step 1: Write failing candidate-resolution tests**
+
+Create `src/backend/drive/__tests__/root-resolver.test.ts` with cases that prove:
+
+```ts
+it('selects the only candidate whose newest manifest authenticates', async () => {
+    const result = await resolveDriveStorageByPassphrase(harness({
+        passphrase: 'correct horse',
+        candidates: [encryptedRoot('old-key'), encryptedRoot('correct horse')],
+    }));
+    expect(result).toMatchObject({ kind: 'ready', layout: { rootId: 'root-correct' } });
+});
+
+it('selects the newest Drive head when the same passphrase opens multiple roots', async () => {
+    const result = await resolveDriveStorageByPassphrase(harness({
+        passphrase: 'shared',
+        candidates: [
+            encryptedRoot('shared', { rootId: 'older', createdTime: '2026-08-09T10:00:00Z' }),
+            encryptedRoot('shared', { rootId: 'newer', createdTime: '2026-08-10T10:00:00Z' }),
+        ],
+    }));
+    expect(result).toMatchObject({ kind: 'ready', layout: { rootId: 'newer' } });
+});
+
+it('reports an incorrect passphrase without creating storage', async () => {
+    const h = harness({ passphrase: 'wrong', candidates: [encryptedRoot('right')] });
+    await expect(resolveDriveStorageByPassphrase(h)).rejects.toThrow('Encryption passphrase is incorrect');
+    expect(h.client.createFolder).not.toHaveBeenCalled();
+});
+
+it('returns missing when no current-format candidate exists', async () => {
+    await expect(resolveDriveStorageByPassphrase(harness({ candidates: [] })))
+        .resolves.toEqual({ kind: 'missing' });
+});
+
+it('accepts one remembered empty root but never guesses among multiple empty roots', async () => {
+    await expect(resolveDriveStorageByPassphrase(harness({
+        candidates: [emptyRoot('a'), emptyRoot('b')], rememberedRootId: 'b',
+    }))).resolves.toMatchObject({ kind: 'empty', layout: { rootId: 'b' } });
+});
+```
+
+The harness must use real `deriveKey`, `deriveDrivePackSubkeys`,
+`makeDrivePackCrypto`, and encrypted manifest bytes. Only Drive transport is
+faked.
+
+- [ ] **Step 2: Run candidate-resolution tests and verify RED**
+
+Run: `npx vitest run src/backend/drive/__tests__/root-resolver.test.ts`
+
+Expected: FAIL because the resolver and multi-root listing do not exist.
+
+- [ ] **Step 3: Add non-creating candidate enumeration**
+
+In `pack-layout.ts`, extract complete-layout parsing and add:
+
+```ts
+export async function listExistingDrivePackLayouts(client: DriveClient): Promise<DrivePackLayout[]> {
+    const roots = await client.searchRootFolders('root-v2');
+    return Promise.all(roots.map(async root =>
+        layoutFromChildren(root.id, await client.listChildren(root.id))));
+}
+```
+
+Keep `createDrivePackLayout` as an explicit mutation called only by Push and
+the confirmed Start-fresh action. Existing single-root helpers may delegate to
+the list function, but Connect must not call a helper that creates storage.
+
+- [ ] **Step 4: Implement passphrase-authenticated resolution**
+
+Create `root-resolver.ts` with these public types:
+
+```ts
+export type DriveStorageResolution =
+    | { kind: 'ready'; layout: DrivePackLayout; head: DriveV2CommitMeta; itemCount: number }
+    | { kind: 'empty'; layout: DrivePackLayout }
+    | { kind: 'missing' };
+
+export interface ResolveDriveStorageOptions {
+    client: DriveClient;
+    passphrase: string;
+    rememberedRootId?: string;
+}
+```
+
+For each candidate, derive the PBKDF2 key with
+`driveSaltFromFolderIdAsync(layout.rootId)`, export it, derive Drive pack
+subkeys, construct `DrivePackStore`, select the newest head, and call
+`readManifest`. Treat only AES-GCM `OperationError` as a nonmatching
+passphrase; propagate Google authorization, network, HTTP, malformed-schema,
+and incomplete-storage errors. Choose valid candidates by head `createdTime`
+then Drive `fileId`. If no committed candidate authenticates, accept only the
+single empty candidate identified by `rememberedRootId`, or the sole empty
+candidate when every candidate is empty. Otherwise throw the generic incorrect
+passphrase/ambiguous-storage error without writing anything.
+
+- [ ] **Step 5: Make Connect discovery-only and v2-only for public flow**
+
+Rewrite `resolveDriveLayoutForConnect` and `handleDriveConnect` so Connect:
+
+```text
+warms OAuth → lists current-format candidates → retains a valid remembered ID
+→ otherwise records no authoritative ID → reports backup found/no backup yet
+```
+
+It must not call `discoverDriveLayout`, show the legacy root picker, create a
+folder, or set a new encryption salt from an unverified candidate. Keep legacy
+helpers available only to internal cleanup/migration paths. Backfill new Drive
+settings to the current internal schema while preserving explicit stored legacy
+state for maintenance.
+
+- [ ] **Step 6: Resolve and unlock on user intent; create only on Push**
+
+Add one index-level helper used by Unlock, Push, Pull, and Check Status:
+
+```ts
+async function prepareDriveEncryption(
+    action: 'unlock' | 'push' | 'pull' | 'status',
+    passphrase: string,
+): Promise<boolean>
+```
+
+Behavior:
+
+- If a valid remembered root/key is already loaded, return `true`.
+- Otherwise call `resolveDriveStorageByPassphrase`.
+- For `ready` or accepted `empty`, atomically adopt its Root ID, derive the
+  deterministic salt, invalidate any remembered key from a different Root,
+  then call `unlockE2ee(passphrase)`.
+- For `missing` during Pull/Status/Unlock, report `No backup yet` and return
+  `false`.
+- For `missing` during Push only, call `createDrivePackLayout`, adopt it,
+  unlock with the entered passphrase, and continue the Push. This creation must
+  occur after the Push click and nowhere else.
+- Never clear the passphrase field until resolution and unlock succeed.
+
+Change `ensureE2eeReady` to accept the action and use the passphrase currently
+entered in the panel before displaying a warning. Automatic sync may use only
+an already remembered/unlocked key; it must never create storage or prompt.
+
+- [ ] **Step 7: Remove implementation jargon from every public string**
+
+Keep stable control IDs but replace visible copy:
+
+```text
+Connected to Drive v2                         → Connected to Google Drive
+TavernSync 30 packs                           → Backup ready · 2,347 items
+Reset to empty Drive v2 Root                  → Start fresh Google Drive storage
+Creating fresh Drive v2 root…                 → Preparing new Google Drive storage…
+Drive v2 Root ready — unlock then Full Push   → New storage ready — Push this device
+packs/blobs                                   → old backup data
+```
+
+Errors exposed to users must say `Encryption passphrase is incorrect`,
+`No backup yet`, `Google connection expired`, or `Backup data is damaged` as
+appropriate. Detailed schema/pack diagnostics remain console-only and must not
+include keys, tokens, or decrypted contents.
+
+- [ ] **Step 8: Run focused tests and verify GREEN**
+
+Run:
+
+```text
+npx vitest run src/backend/drive/__tests__/root-resolver.test.ts src/backend/drive/__tests__/connect-layout.test.ts src/backend/drive/__tests__/pack-layout.test.ts src/ui/__tests__/control-compatibility.test.ts
+```
+
+Expected: PASS, including assertions that Connect/Pull/Status never call
+`createFolder`, wrong passphrases perform no writes, first Push may create one
+storage area, and public HTML/toast strings contain none of the forbidden
+terms.
+
+- [ ] **Step 9: Run full automated verification**
+
+Run: `npm test`
+
+Run: `npx tsc --noEmit`
+
+Run: `npm run lint`
+
+Run: `npm run build`
+
+Run: `git diff --check`
+
+Expected: zero failures and no whitespace errors.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/backend/drive/root-resolver.ts src/backend/drive/__tests__/root-resolver.test.ts src/backend/drive/pack-layout.ts src/backend/drive/__tests__/pack-layout.test.ts src/backend/drive/connect-layout.ts src/backend/drive/__tests__/connect-layout.test.ts src/settings.ts src/index.ts panel.html src/ui/__tests__/control-compatibility.test.ts docs/superpowers/specs/2026-08-10-drive-v2-extension-only-adaptive-restore-design.md docs/superpowers/plans/2026-08-10-drive-v2-extension-only-adaptive-restore.md
+git commit -m "feat(drive): resolve encrypted storage automatically"
+```
+
+---
+
+### Task 11: End-to-End Fault Matrix, Benchmark, and Release Gate
 
 **Files:**
 - Create: `src/backend/drive/__tests__/adaptive-pull.integration.test.ts`
@@ -1654,6 +1870,6 @@ Expected: only the pre-existing untracked `.omo/` remains.
 
 Run: `git log --oneline --decorate dd96939..HEAD`
 
-Expected: the implementation commits from Tasks 1-10 in task order.
+Expected: the implementation commits from Tasks 1-11 in task order.
 
 Do not merge or push until the owner reviews the live evidence and explicitly authorizes Git integration.
