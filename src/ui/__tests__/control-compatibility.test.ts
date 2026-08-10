@@ -25,3 +25,17 @@ it('keeps every approved control in the panel', () => {
         expect(html).toContain(`id="${id}"`);
     }
 });
+
+it('keeps destructive Drive maintenance controls inside Advanced with readable widths', () => {
+    const html = readFileSync(new URL('../../../panel.html', import.meta.url), 'utf8');
+    const css = readFileSync(new URL('../../style.css', import.meta.url), 'utf8');
+    const advancedStart = html.indexOf('<b>Advanced</b>');
+
+    expect(advancedStart).toBeGreaterThan(-1);
+    for (const id of ['tavernsync_reset_drive_v2', 'tavernsync_gc', 'tavernsync_wipe_remote']) {
+        const controlStart = html.indexOf(`id="${id}"`);
+        expect(controlStart).toBeGreaterThan(advancedStart);
+        expect(html.slice(controlStart, controlStart + 240)).toContain('tavernsync-maintenance-button');
+    }
+    expect(css).toMatch(/\.tavernsync-maintenance-button\s*\{[^}]*width:\s*min\(100%,\s*16rem\)/s);
+});

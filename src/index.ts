@@ -150,8 +150,7 @@ function updateBackendFieldsVisibility(): void {
     const isDriveV2 = isDrive && s.driveRootVersion === 2;
     $('#tavernsync_drive_fields').toggle(isDrive);
     $('#tavernsync_http_fields').toggle(!isDrive);
-    $('#tavernsync_gc').toggle(isDrive);
-    $('#tavernsync_reset_drive_v2').toggle(isDrive);
+    $('#tavernsync_drive_maintenance').toggle(isDrive);
     const v2Visibility = driveV2Visibility();
     $('#tavernsync_push').toggle(!isDriveV2 || v2Visibility.push);
     $('#tavernsync_pull').toggle(!isDriveV2 || v2Visibility.pull);
@@ -802,18 +801,20 @@ function bindSettingsHandlers(): void {
 }
 
 async function handleWipeRemote(): Promise<void> {
-    if (!getSettings().endpoint.trim() || !getSettings().deviceToken.trim()) {
+    const settings = getSettings();
+    if (settings.backendMode !== 'drive'
+        && (!settings.endpoint.trim() || !settings.deviceToken.trim())) {
         toastr.warning('Add your server URL and sync token first.', 'TavernSync');
         return;
     }
     const ok = window.confirm(
-        'Clear sync data on the server?\n\nYour local SillyTavern files stay put.\nAfterward, Push from the device that has the copy you want to keep.',
+        'Clear remote sync data?\n\nYour local SillyTavern files stay put.\nAfterward, Push from the device that has the copy you want to keep.',
     );
     if (!ok) return;
     try {
         await wipeRemoteSyncData();
-        setStatusLine('Server sync cleared');
-        toastr.success('Server sync data wiped. Push from your main device next.', 'TavernSync');
+        setStatusLine('Remote sync cleared');
+        toastr.success('Remote sync data wiped. Push from your main device next.', 'TavernSync');
     } catch (e) {
         console.error(LOG_PREFIX, e);
         toastr.error(`Wipe failed: ${String(e)}`, 'TavernSync');

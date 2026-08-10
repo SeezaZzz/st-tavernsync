@@ -11,6 +11,7 @@ import {
     type DriveV2PushController,
     type DriveV2PushResult,
 } from '../backend/drive/drive-v2-push';
+import { wipeDriveV2RemoteSnapshot } from '../backend/drive/drive-v2-wipe';
 import { runDriveV2Pull, type DriveV2PullResult } from '../backend/drive/drive-v2-pull';
 import {
     runDriveV2Sync,
@@ -147,6 +148,23 @@ export async function clearBase(): Promise<void> {
 
 export async function wipeRemoteSyncData(): Promise<void> {
     const s = getSettings();
+    if (s.backendMode === 'drive' && s.driveRootVersion === 2) {
+        const runtime = await requireDriveV2Runtime();
+        currentNamespace = `drive:${runtime.layout.rootId}`;
+        const { commitId } = await wipeDriveV2RemoteSnapshot(
+            runtime.store,
+            s.deviceName || 'device',
+        );
+        await saveDriveV2Base(currentNamespace, {
+            commitId,
+            syncedAt: Date.now(),
+        });
+        s.lastStatusMessage = 'Remote wiped';
+        s.lastItemCount = 0;
+        saveSettings();
+        console.log(LOG_PREFIX, 'Drive v2 remote snapshot wiped', { commitId });
+        return;
+    }
     const rt = await requireRuntime();
     currentNamespace = rt.storageNamespace;
     const adapter = rt.storage;

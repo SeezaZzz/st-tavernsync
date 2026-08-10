@@ -22,6 +22,7 @@ const harness = vi.hoisted(() => ({
         maxActiveWriters: 0,
         elapsedMs: 40,
     })),
+    wipeDriveV2RemoteSnapshot: vi.fn(async () => ({ commitId: 'empty-head' })),
     runDriveV2Sync: vi.fn(async (options: {
         direction: string;
         runPull: (commit: unknown, manifest: unknown) => Promise<unknown>;
@@ -95,11 +96,15 @@ vi.mock('../drive/drive-v2-pull', async importOriginal => {
     return { ...original, runDriveV2Pull: harness.adaptivePull };
 });
 
+vi.mock('../drive/drive-v2-wipe', () => ({
+    wipeDriveV2RemoteSnapshot: harness.wipeDriveV2RemoteSnapshot,
+}));
+
 vi.mock('../drive/oauth', () => ({
     getSharedGisTokenProvider: () => ({ getToken: async () => 'token' }),
 }));
 
-import { runSync, unlockE2ee } from '../../sync/engine';
+import { runSync, unlockE2ee, wipeRemoteSyncData } from '../../sync/engine';
 
 beforeEach(async () => {
     harness.directions.length = 0;
@@ -107,6 +112,7 @@ beforeEach(async () => {
     harness.scanLocal.mockClear();
     harness.listLocalInventory.mockClear();
     harness.adaptivePull.mockClear();
+    harness.wipeDriveV2RemoteSnapshot.mockClear();
     (globalThis as unknown as { SillyTavern: unknown }).SillyTavern = {
         libs: {
             localforage: {
@@ -158,5 +164,15 @@ describe('Drive v2 engine routing', () => {
         const source = readFileSync(new URL('../../sync/engine.ts', import.meta.url), 'utf8');
 
         expect(source).not.toMatch(/core-restore|restore-session|RestoreSessionClient|runDriveV2CoreRestore/);
+    });
+
+    it('routes remote wipe through the Drive v2 empty-snapshot path', async () => {
+        await wipeRemoteSyncData();
+
+        expect(harness.wipeDriveV2RemoteSnapshot).toHaveBeenCalledOnce();
+        expect(harness.wipeDriveV2RemoteSnapshot).toHaveBeenCalledWith(
+            expect.objectContaining({ commitManifest: expect.any(Function) }),
+            'phone',
+        );
     });
 });
