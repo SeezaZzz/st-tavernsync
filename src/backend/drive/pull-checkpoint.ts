@@ -46,7 +46,7 @@ export class DriveV2PullCheckpoint {
     }
 
     flushIfDue(force = false): void {
-        if (!this.dirty) return;
+        if (!this.dirty && !force) return;
         const currentTime = this.now();
         if (!force && this.dirty < 25 && currentTime - this.lastSavedAt < 2_000) return;
 

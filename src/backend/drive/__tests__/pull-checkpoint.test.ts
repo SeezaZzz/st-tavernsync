@@ -61,4 +61,21 @@ describe('DriveV2PullCheckpoint', () => {
         });
         expect(saved[1]).toBeNull();
     });
+
+    it('force-flushes a loaded checkpoint even when no new item completed', () => {
+        const saved: Array<DriveV2PullCheckpointState | null> = [];
+        const checkpoint = new DriveV2PullCheckpoint('head-a', {
+            load: () => ({
+                commitId: 'head-a',
+                completedItemIds: ['preset/done'],
+                updatedAt: 1,
+            }),
+            save: value => { saved.push(value); },
+        });
+
+        checkpoint.flushIfDue(true);
+
+        expect(saved).toHaveLength(1);
+        expect(saved[0]?.completedItemIds).toEqual(['preset/done']);
+    });
 });
