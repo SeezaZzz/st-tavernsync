@@ -6,15 +6,12 @@ import { DriveUploadPausedError } from './backend/drive/pack-uploader';
 import { GisTokenProvider, getSharedGisTokenProvider } from './backend/drive/oauth';
 import {
     discoverDriveLayout,
-    MultipleRootsError,
     type DriveAdapter,
-    type DriveLayout,
 } from './backend/drive/adapter';
 import {
-    discoverDrivePackLayout,
-    recoverExistingDrivePackLayout,
     resetDriveRootToV2,
 } from './backend/drive/pack-layout';
+import { resolveDriveLayoutForConnect } from './backend/drive/connect-layout';
 import { prepareDriveRootKeyTransition } from './backend/drive/root-key-transition';
 import {
     canResetDriveV2,
@@ -346,27 +343,15 @@ async function handleDriveConnect(): Promise<void> {
             // warm token ด้วย consent popup ตรง ๆ ก่อน — ปุ่มนี้คือ gesture
             // (prompt:'' ที่ลองก่อนค้างเงียบ ๆ ในเบราว์เซอร์ที่บล็อก third-party cookies)
             await getSharedGisTokenProvider(s.driveClientId.trim()).getTokenInteractive();
-            let layout: DriveLayout | Awaited<ReturnType<typeof discoverDrivePackLayout>>;
-            if (s.driveRootVersion === 2) {
-                layout = await discoverDrivePackLayout(client, s.driveFolderId.trim() || undefined);
-            } else {
-                try {
-                    // ปุ่มนี้คือ user gesture — token ครั้งแรกจะเด้ง consent ที่นี่
-                    console.debug(LOG_PREFIX, 'drive connect: discover layout (ขอ token + หา/สร้างโฟลเดอร์)…');
-                    layout = await discoverDriveLayout(client, s.driveFolderId.trim() || undefined);
-                } catch (e) {
-                    if (e instanceof MultipleRootsError) {
-                        const picked = await pickDriveRoot(e.roots);
-                        if (!picked) throw new Error('ยังไม่ได้เลือกโฟลเดอร์ TavernSync');
-                        layout = await discoverDriveLayout(client, picked);
-                    } else {
-                        // Root v1 IDs are local per device. After another device resets to v2,
-                        // a stale device must adopt the existing v2 Root rather than create/reset one.
-                        layout = await recoverExistingDrivePackLayout(client, e);
-                        s.driveRootVersion = 2;
-                    }
-                }
-            }
+            console.debug(LOG_PREFIX, 'drive connect: discover preferred layout…');
+            const resolved = await resolveDriveLayoutForConnect({
+                client,
+                currentVersion: s.driveRootVersion,
+                knownRootId: s.driveFolderId,
+                pickLegacyRoot: pickDriveRoot,
+            });
+            const layout = resolved.layout;
+            s.driveRootVersion = resolved.version;
             console.debug(LOG_PREFIX, `drive connect: layout ready (root=${layout.rootId.slice(0, 8)}…)`);
             const rootChanged = await prepareDriveRootKeyTransition(
                 s.driveFolderId,
