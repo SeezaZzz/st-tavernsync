@@ -152,4 +152,14 @@ describe('Drive v2 extension-only Pull', () => {
         expect(h.events.indexOf('finalize')).toBeGreaterThan(h.events.indexOf('apply:persona/b.png'));
         expect(h.events.indexOf('finalize')).toBeLessThan(h.events.indexOf('save-base:head-b'));
     });
+
+    it('applies the mobile profile writer and memory bounds', async () => {
+        const h = await createAdaptivePullHarness({
+            remote: Array.from({ length: 40 }, (_, index) => `preset/${index}`),
+        });
+        const result = await runDriveV2Pull({ ...h.options, profile: 'mobile' });
+        expect(result.maxActiveWriters).toBeLessThanOrEqual(4);
+        expect(result.peakEncryptedBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+        expect(result.peakPlaintextBytes).toBeLessThanOrEqual(24 * 1024 * 1024);
+    });
 });

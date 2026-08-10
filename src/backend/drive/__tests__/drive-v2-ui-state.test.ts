@@ -36,6 +36,7 @@ describe('Drive v2 UI state', () => {
         })).toBe('Downloading packs 8/30 · 11.2 MB/s · ETA 00:19');
         expect(formatDriveV2PullProgress({
             stage: 'apply',
+            profile: 'pc',
             completedItems: 724,
             totalItems: 2347,
             itemType: 'chat',
@@ -45,7 +46,7 @@ describe('Drive v2 UI state', () => {
             uniquePacksRequired: 30,
             packDownloadRequests: 8,
             etaSeconds: 66,
-        })).toBe('Packs 8/30 · Restoring 724/2347 · 24.5 items/s · 7 writers · ETA 01:06');
+        })).toBe('Packs 8/30 · PC / Fast · Restoring 724/2347 · 24.5 items/s · 7 writers · ETA 01:06');
         expect(formatDriveV2PullProgress({ stage: 'delete', totalItems: 3 }))
             .toBe('Deleting 3 items');
     });
@@ -57,6 +58,15 @@ describe('Drive v2 UI state', () => {
             status: true,
             autoSync: true,
         });
+    });
+
+    it('shows the mobile profile in Pull progress', () => {
+        expect(formatDriveV2PullProgress({
+            stage: 'apply', profile: 'mobile', completedItems: 1, totalItems: 2,
+            itemType: 'preset', itemsPerSecond: 1, activeWriters: 4,
+            downloadedPacks: 1, uniquePacksRequired: 1, packDownloadRequests: 1,
+            etaSeconds: 1,
+        })).toContain('Mobile / Stable');
     });
 
     it('recognizes expired Google authorization as reconnect-and-resume', () => {
