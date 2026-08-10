@@ -24,6 +24,15 @@ export function computeDriveV2Heads(commits: readonly DriveV2CommitMeta[]): Driv
     return commits.filter(commit => !referenced.has(commit.commitId));
 }
 
+export function selectNewestDriveV2Head(
+    heads: readonly DriveV2CommitMeta[],
+): DriveV2CommitMeta {
+    if (heads.length === 0) throw new Error('Drive v2 has no committed snapshot');
+    return [...heads].sort((a, b) =>
+        b.createdTime.localeCompare(a.createdTime)
+        || b.fileId.localeCompare(a.fileId))[0];
+}
+
 export function parentProperties(parents: readonly string[]): Record<string, string> {
     return parents.length ? { parents: parents.join(',') } : {};
 }
