@@ -70,7 +70,7 @@ describe('extension-only adaptive Pull integration', () => {
         expect(result.peakEncryptedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
     });
 
-    it('bounds mobile pack downloads when character dependencies are scattered across hashed packs', async () => {
+    it('uses one verified range read per mobile item when dependencies span hashed packs', async () => {
         // Given: character/chat pairs are distributed differently across hashed pack names.
         const packCount = 8;
         const chats = Array.from({ length: 40 }, (_, index) => `chat/char-${index}.png/day`);
@@ -88,13 +88,15 @@ describe('extension-only adaptive Pull integration', () => {
             packReadDelayMs: 1,
         });
 
-        // When: the snapshot is restored with the one-pack Mobile cache.
+        // When: the snapshot is restored through the Mobile range path.
         const result = await runDriveV2Pull({ ...h.options, profile: 'mobile' });
 
-        // Then: dependency scheduling must not bounce among full packs without a bound.
+        // Then: Mobile never downloads a full pack and touches every required range once.
         expect(h.inventory()).toEqual(h.remoteInventory());
-        expect(h.packReads).toBeLessThanOrEqual(packCount * 2);
-        expect(result.packDownloadRequests).toBeLessThanOrEqual(packCount * 2);
+        expect(h.packReads).toBe(0);
+        expect(h.chunkReads).toBe(160);
+        expect(result.downloadedPacks).toBe(packCount);
+        expect(result.packDownloadRequests).toBe(160);
     });
 
     it('reports five-run adaptive Pull benchmark evidence', async () => {

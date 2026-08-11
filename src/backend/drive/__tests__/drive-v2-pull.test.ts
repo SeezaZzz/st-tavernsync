@@ -16,6 +16,17 @@ describe('Drive v2 extension-only Pull', () => {
         expect(result.packDownloadRequests).toBe(1);
     });
 
+    it('reads only encrypted chunk ranges in the mobile profile', async () => {
+        const h = await createAdaptivePullHarness({
+            remote: Array.from({ length: 10 }, (_, index) => `preset/${index}`),
+        });
+
+        await runDriveV2Pull({ ...h.options, profile: 'mobile' });
+
+        expect(h.packReads).toBe(0);
+        expect(h.chunkReads).toBe(10);
+    });
+
     it('does not download or write items whose local content hash already matches Drive', async () => {
         const h = await createAdaptivePullHarness({
             remote: ['preset/same', 'preset/changed'],

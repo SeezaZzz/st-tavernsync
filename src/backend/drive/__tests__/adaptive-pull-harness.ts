@@ -83,7 +83,7 @@ export async function createAdaptivePullHarness(
         abort.abort(new DOMException('cancelled', 'AbortError'));
     }
     let packReads = 0;
-    const chunkReads = 0;
+    let chunkReads = 0;
 
     const options: DriveV2PullOptions = {
         commit: {
@@ -116,6 +116,15 @@ export async function createAdaptivePullHarness(
                     throw new Error(input.fault);
                 }
                 return new Uint8Array(packSizes.get(name) ?? 0)
+                    .fill(input.fault === 'chunk-hash' ? 2 : 1);
+            },
+            readChunk: async ref => {
+                chunkReads += 1;
+                if (input.fault
+                    && ['network-loss', 'http-408', 'http-429', 'http-500'].includes(input.fault)) {
+                    throw new Error(input.fault);
+                }
+                return new Uint8Array(ref.boxedLength)
                     .fill(input.fault === 'chunk-hash' ? 2 : 1);
             },
         },

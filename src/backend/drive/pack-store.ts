@@ -2,6 +2,7 @@ import { sha256Hex } from '../../st-adapter/normalize';
 import { DriveClient, type DriveFileMeta } from './client';
 import type { DrivePackCrypto } from './pack-crypto';
 import type { DrivePackLayout } from './pack-layout';
+import { DriveRangeSource, type DriveChunkRange } from './range-source';
 import { uploadPackResumable, type PackUploadControl } from './pack-uploader';
 import type { DrivePackManifestV2, EncryptedPack } from './pack-types';
 import {
@@ -13,6 +14,7 @@ import {
 export class DrivePackStore {
     private listing: Promise<Map<string, DriveFileMeta>> | null = null;
     private verifiedPacks: Map<string, number> | null = null;
+    private rangeSource: DriveRangeSource | null = null;
 
     constructor(
         private readonly client: DriveClient,
@@ -51,6 +53,11 @@ export class DrivePackStore {
         const file = (await this.listPacks()).get(name);
         if (!file) throw new Error(`missing pack: ${name}`);
         return this.client.getFileData(file.id);
+    }
+
+    async readChunk(ref: DriveChunkRange, signal?: AbortSignal): Promise<Uint8Array> {
+        if (!this.rangeSource) this.rangeSource = new DriveRangeSource(this, this.client);
+        return this.rangeSource.readChunk(ref, signal);
     }
 
     async putPack(pack: EncryptedPack, options: PackUploadControl = {}): Promise<void> {

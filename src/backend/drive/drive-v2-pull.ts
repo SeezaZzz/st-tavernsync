@@ -9,11 +9,13 @@ import type { DrivePackCrypto } from './pack-crypto';
 import { DriveV2PackReader, type DriveV2PackSource } from './pack-reader';
 import type { DrivePackManifestV2 } from './pack-types';
 import type { DriveV2PullCheckpoint } from './pull-checkpoint';
+import type { DriveRangeSource } from './range-source';
 import {
     getPullPerformanceConfig,
     type PullPerformanceProfile,
 } from './pull-performance-profile';
 import { isTransientPullError, withPullStage } from './pull-stage-error';
+import { readVerifiedItem } from './verified-item-reader';
 
 const DEFAULT_ENCRYPTED_BUDGET = 64 * 1024 * 1024;
 const DEFAULT_PLAINTEXT_BUDGET = 48 * 1024 * 1024;
@@ -44,7 +46,7 @@ export interface DriveV2PullOptions {
     readonly localInventory: ReadonlyMap<string, ItemType>;
     readonly localHashes?: ReadonlyMap<string, string>;
     readonly allowedTypes: ReadonlySet<ItemType>;
-    readonly source: Pick<DriveV2PackSource, 'readPack'>;
+    readonly source: Pick<DriveV2PackSource, 'readPack'> & Partial<Pick<DriveRangeSource, 'readChunk'>>;
     readonly crypto: Pick<DrivePackCrypto, 'decryptChunk'>;
     readonly checkpoint: DriveV2PullCheckpoint;
     readonly applyItem: (id: string, type: ItemType, bytes: Uint8Array) => Promise<void>;
@@ -85,11 +87,21 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
         2,
         Math.floor(encryptedBudget.capacityBytes / Math.max(1, options.manifest.packBytes)),
     ));
-    const packReader = new DriveV2PackReader(
-        options.source,
-        options.crypto,
-        packCacheSlots,
-    );
+    const packReader = profile === 'pc'
+        ? new DriveV2PackReader(options.source, options.crypto, packCacheSlots)
+        : null;
+    const rangedPackNames = new Set<string>();
+    let rangeReadRequests = 0;
+    const readChunk = options.source.readChunk;
+    const rangeSource = {
+        readChunk: async (...args: Parameters<DriveRangeSource['readChunk']>) => {
+            if (!readChunk) throw new Error('Mobile pull requires Drive byte-range support');
+            rangeReadRequests += 1;
+            const bytes = await readChunk(...args);
+            rangedPackNames.add(args[0].packName);
+            return bytes;
+        },
+    };
     const remote = Object.values(options.manifest.items)
         .filter(item => options.allowedTypes.has(item.type) && !isSelfExtension(item.id));
     const remoteIds = new Set(remote.map(item => item.id));
@@ -142,6 +154,28 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
             isTransientError: isTransientPullError,
             retryDelay: attempt => new Promise(resolve => setTimeout(resolve, 250 * (2 ** (attempt - 1)))),
             async run(job) {
+                if (profile === 'mobile') {
+                    const prepared = await readVerifiedItem({
+                        item: job.item,
+                        source: rangeSource,
+                        crypto: options.crypto,
+                        encryptedBudget,
+                        plaintextBudget,
+                        signal: options.signal,
+                    });
+                    try {
+                        await withPullStage(
+                            'local-write', 'POST', `st-item://${job.item.id}`,
+                            () => options.applyItem(job.item.id, job.item.type, prepared.bytes),
+                        );
+                        options.checkpoint.markCompleted(job.item.id);
+                    } finally {
+                        prepared.release();
+                    }
+                    return;
+                }
+
+                if (!packReader) throw new Error('PC pull requires a pack reader');
                 const plainPermit = await plaintextBudget.acquire(
                     Math.max(1, job.item.size),
                     options.signal,
@@ -168,9 +202,9 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
                 itemType: snapshot.lastItemType,
                 itemsPerSecond: snapshot.itemsPerSecond,
                 activeWriters: snapshot.activeWriters,
-                downloadedPacks: packReader.getDownloadedPackCount(),
+                downloadedPacks: packReader?.getDownloadedPackCount() ?? rangedPackNames.size,
                 uniquePacksRequired,
-                packDownloadRequests: packReader.getPackDownloadRequestCount(),
+                packDownloadRequests: packReader?.getPackDownloadRequestCount() ?? rangeReadRequests,
                 etaSeconds: snapshot.etaSeconds,
             }),
         });
@@ -212,10 +246,10 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
             applied: metrics.completed,
             deleted: deletions.length,
             skippedInSync: skippedIds.size,
-            downloadedPacks: packReader.getDownloadedPackCount(),
-            packDownloadRequests: packReader.getPackDownloadRequestCount(),
-            peakCachedBytes: packReader.getPeakCachedBytes(),
-            peakEncryptedBytes: packReader.getPeakCachedBytes(),
+            downloadedPacks: packReader?.getDownloadedPackCount() ?? rangedPackNames.size,
+            packDownloadRequests: packReader?.getPackDownloadRequestCount() ?? rangeReadRequests,
+            peakCachedBytes: packReader?.getPeakCachedBytes() ?? encryptedBudget.peakBytes,
+            peakEncryptedBytes: packReader?.getPeakCachedBytes() ?? encryptedBudget.peakBytes,
             peakPlaintextBytes: plaintextBudget.peakBytes,
             maxActiveWriters: metrics.maxActiveWriters,
             elapsedMs: metrics.elapsedMs,

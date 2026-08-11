@@ -64,6 +64,7 @@ function makeStore(options: {
     const files = new Map((options.existing ?? []).map(file => [file.name, file]));
     const sessions = new Map<string, { name: string; totalBytes: number }>();
     const events: string[] = [];
+    const rangeReads: Array<{ fileId: string; start: number; length: number }> = [];
     const commitBytes: Uint8Array[] = [];
     const committedProperties: Record<string, string>[] = [];
     const client = {
@@ -101,6 +102,10 @@ function makeStore(options: {
             if (!bytes) throw new Error(`missing fixture bytes: ${fileId}`);
             return bytes;
         },
+        async getFileRange(fileId: string, start: number, length: number): Promise<Uint8Array> {
+            rangeReads.push({ fileId, start, length });
+            return new Uint8Array(length).fill(7);
+        },
         async createFile(
             _parentId: string,
             name: string,
@@ -118,7 +123,7 @@ function makeStore(options: {
         cryptoStub(),
         { rootId: 'root-id', packsId: 'packs-id', manifestsId: 'manifests-id' },
     );
-    return { store, client, events, commitBytes, committedProperties };
+    return { store, client, events, rangeReads, commitBytes, committedProperties };
 }
 
 describe('Drive pack store', () => {
@@ -144,6 +149,17 @@ describe('Drive pack store', () => {
         });
         await expect(store.readPack('pack-a')).resolves.toHaveLength(4);
         await expect(store.readPack('missing')).rejects.toThrow('missing pack');
+    });
+
+    it('reads a validated encrypted chunk range without downloading the full pack', async () => {
+        const { store, rangeReads } = makeStore({
+            existing: [{ id: 'p1', name: 'pack-a', size: '100' }],
+        });
+
+        await expect(store.readChunk({ packName: 'pack-a', offset: 10, boxedLength: 20 }))
+            .resolves.toHaveLength(20);
+
+        expect(rangeReads).toEqual([{ fileId: 'p1', start: 10, length: 20 }]);
     });
 
     it('publishes only parent hashes in appProperties', async () => {
