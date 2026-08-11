@@ -6,6 +6,7 @@ export interface PullJob {
     readonly item: DrivePackItemV2;
     readonly cost: PullCostClass;
     readonly dependencies: readonly string[];
+    readonly phase: 0 | 1;
 }
 
 export interface AdaptivePullSnapshot {
@@ -80,7 +81,7 @@ export function classifyPullJob(
                 ? 'medium'
                 : 'small';
 
-    return { item, cost, dependencies };
+    return { item, cost, dependencies, phase: dependencies.length ? 1 : 0 };
 }
 
 function percentile95(values: readonly number[]): number {
@@ -120,6 +121,7 @@ export function runAdaptivePullQueue(
     let active = 0;
     let maxActiveWriters = 0;
     let aggregateLimit = options.aggregateLimit ?? Number.MAX_SAFE_INTEGER;
+    let currentPhase: 0 | 1 = pending.some(job => job.phase === 0) ? 0 : 1;
     const minimumAggregateLimit = options.minimumAggregateLimit ?? aggregateLimit;
     const transientRetries = options.transientRetries ?? 0;
     const attempts = new Map<string, number>();
@@ -153,11 +155,16 @@ export function runAdaptivePullQueue(
                 return;
             }
 
+            if (active === 0 && !pending.some(job => job.phase === currentPhase)) {
+                currentPhase = 1;
+            }
+
             let launched = false;
             for (let index = 0; index < pending.length;) {
                 const job = pending[index];
                 const ready = job.dependencies.every(id => completedIds.has(id));
-                if (!ready || active >= aggregateLimit || activeByClass[job.cost] >= limits[job.cost]) {
+                if (job.phase !== currentPhase || !ready
+                    || active >= aggregateLimit || activeByClass[job.cost] >= limits[job.cost]) {
                     index += 1;
                     continue;
                 }
