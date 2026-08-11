@@ -113,12 +113,15 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
         .filter(item => !skippedIds.has(item.id))
         .map(item => {
             const job = classifyPullJob(item, remoteIds);
+            const dependencies = job.dependencies.filter(id => !skippedIds.has(id));
             return {
                 ...job,
-                dependencies: job.dependencies.filter(id => !skippedIds.has(id)),
+                dependencies,
+                phase: dependencies.length ? 1 as const : 0 as const,
             };
         });
     jobs.sort((left, right) => {
+        if (left.phase !== right.phase) return left.phase - right.phase;
         const leftPack = left.item.chunks[0]?.packName ?? '';
         const rightPack = right.item.chunks[0]?.packName ?? '';
         return leftPack.localeCompare(rightPack);

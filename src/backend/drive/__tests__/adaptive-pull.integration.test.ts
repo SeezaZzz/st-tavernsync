@@ -70,6 +70,33 @@ describe('extension-only adaptive Pull integration', () => {
         expect(result.peakEncryptedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
     });
 
+    it('bounds mobile pack downloads when character dependencies are scattered across hashed packs', async () => {
+        // Given: character/chat pairs are distributed differently across hashed pack names.
+        const packCount = 8;
+        const chats = Array.from({ length: 40 }, (_, index) => `chat/char-${index}.png/day`);
+        const assets = Array.from({ length: 40 }, (_, index) => `characterasset/char-${index}/sprite.png`);
+        const states = Array.from({ length: 40 }, (_, index) => `characterstate/char-${index}.png`);
+        const characters = Array.from({ length: 40 }, (_, index) => `character/char-${index}.png`);
+        const h = await createAdaptivePullHarness({
+            remote: [...chats, ...assets, ...states, ...characters],
+            packNames: [
+                ...chats.map((_, index) => `pack-${(index * 3 + 1) % packCount}`),
+                ...assets.map((_, index) => `pack-${(index * 7 + 2) % packCount}`),
+                ...states.map((_, index) => `pack-${(index * 5 + 3) % packCount}`),
+                ...characters.map((_, index) => `pack-${(index * 5 + 4) % packCount}`),
+            ],
+            packReadDelayMs: 1,
+        });
+
+        // When: the snapshot is restored with the one-pack Mobile cache.
+        const result = await runDriveV2Pull({ ...h.options, profile: 'mobile' });
+
+        // Then: dependency scheduling must not bounce among full packs without a bound.
+        expect(h.inventory()).toEqual(h.remoteInventory());
+        expect(h.packReads).toBeLessThanOrEqual(packCount * 2);
+        expect(result.packDownloadRequests).toBeLessThanOrEqual(packCount * 2);
+    });
+
     it('reports five-run adaptive Pull benchmark evidence', async () => {
         const runs: Array<{
             elapsedMs: number;

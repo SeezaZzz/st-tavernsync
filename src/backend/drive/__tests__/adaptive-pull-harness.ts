@@ -11,6 +11,7 @@ export interface AdaptivePullHarnessInput {
     fail?: string;
     packCount?: number;
     packNames?: string[];
+    packReadDelayMs?: number;
     fault?: 'network-loss' | 'http-408' | 'http-429' | 'http-500' | 'wrong-passphrase'
         | 'chunk-hash' | 'item-hash' | 'apply-failure' | 'cancel';
 }
@@ -107,6 +108,9 @@ export async function createAdaptivePullHarness(
         source: {
             readPack: async name => {
                 packReads += 1;
+                if (input.packReadDelayMs) {
+                    await new Promise(resolve => setTimeout(resolve, input.packReadDelayMs));
+                }
                 if (input.fault
                     && ['network-loss', 'http-408', 'http-429', 'http-500'].includes(input.fault)) {
                     throw new Error(input.fault);
