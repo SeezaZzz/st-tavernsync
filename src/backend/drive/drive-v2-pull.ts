@@ -119,12 +119,10 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
                 dependencies,
                 phase: dependencies.length ? 1 as const : 0 as const,
             };
-        });
+    });
     jobs.sort((left, right) => {
         if (left.phase !== right.phase) return left.phase - right.phase;
-        const leftPack = left.item.chunks[0]?.packName ?? '';
-        const rightPack = right.item.chunks[0]?.packName ?? '';
-        return leftPack.localeCompare(rightPack);
+        return left.affinity.localeCompare(right.affinity);
     });
     const uniquePacksRequired = new Set(jobs.flatMap(job =>
         job.item.chunks.map(chunk => chunk.packName))).size;
