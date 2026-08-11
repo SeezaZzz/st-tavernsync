@@ -7,6 +7,7 @@ export interface PullJob {
     readonly cost: PullCostClass;
     readonly dependencies: readonly string[];
     readonly phase: 0 | 1;
+    readonly affinity: string;
 }
 
 export interface AdaptivePullSnapshot {
@@ -81,7 +82,13 @@ export function classifyPullJob(
                 ? 'medium'
                 : 'small';
 
-    return { item, cost, dependencies, phase: dependencies.length ? 1 : 0 };
+    return {
+        item,
+        cost,
+        dependencies,
+        phase: dependencies.length ? 1 : 0,
+        affinity: item.chunks[0]?.packName ?? '',
+    };
 }
 
 function percentile95(values: readonly number[]): number {
@@ -122,6 +129,7 @@ export function runAdaptivePullQueue(
     let maxActiveWriters = 0;
     let aggregateLimit = options.aggregateLimit ?? Number.MAX_SAFE_INTEGER;
     let currentPhase: 0 | 1 = pending.some(job => job.phase === 0) ? 0 : 1;
+    let currentAffinity = pending.find(job => job.phase === currentPhase)?.affinity ?? '';
     const minimumAggregateLimit = options.minimumAggregateLimit ?? aggregateLimit;
     const transientRetries = options.transientRetries ?? 0;
     const attempts = new Map<string, number>();
@@ -157,13 +165,17 @@ export function runAdaptivePullQueue(
 
             if (active === 0 && !pending.some(job => job.phase === currentPhase)) {
                 currentPhase = 1;
+                currentAffinity = pending.find(job => job.phase === currentPhase)?.affinity ?? '';
+            } else if (active === 0 && !pending.some(job =>
+                job.phase === currentPhase && job.affinity === currentAffinity)) {
+                currentAffinity = pending.find(job => job.phase === currentPhase)?.affinity ?? '';
             }
 
             let launched = false;
             for (let index = 0; index < pending.length;) {
                 const job = pending[index];
                 const ready = job.dependencies.every(id => completedIds.has(id));
-                if (job.phase !== currentPhase || !ready
+                if (job.phase !== currentPhase || job.affinity !== currentAffinity || !ready
                     || active >= aggregateLimit || activeByClass[job.cost] >= limits[job.cost]) {
                     index += 1;
                     continue;
