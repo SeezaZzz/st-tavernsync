@@ -32,9 +32,9 @@ const CONFIGS: Record<PullPerformanceProfile, PullPerformanceConfig> = {
         profile: 'mobile',
         label: 'Mobile / Stable',
         limits: {
-            initial: { small: 2, medium: 1, heavy: 1, serial: 1 },
+            initial: { small: 4, medium: 4, heavy: 4, serial: 1 },
             minimum: { small: 1, medium: 1, heavy: 1, serial: 1 },
-            maximum: { small: 3, medium: 2, heavy: 1, serial: 1 },
+            maximum: { small: 4, medium: 4, heavy: 4, serial: 1 },
         },
         aggregateCap: 4,
         minimumAggregateCap: 2,

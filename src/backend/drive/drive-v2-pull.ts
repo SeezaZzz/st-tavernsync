@@ -130,6 +130,7 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
                 ...job,
                 dependencies,
                 phase: dependencies.length ? 1 as const : 0 as const,
+                affinity: profile === 'mobile' ? '' : job.affinity,
             };
     });
     jobs.sort((left, right) => {

@@ -44,6 +44,19 @@ describe('Drive v2 extension-only Pull', () => {
             .resolves.toMatchObject({ applied: 1 });
     });
 
+    it('uses four mobile range writers across different pack names', async () => {
+        const remote = Array.from({ length: 40 }, (_, index) => `chat/ghost.png/day-${index}`);
+        const h = await createAdaptivePullHarness({
+            remote,
+            packNames: remote.map((_, index) => `pack-${index % 4}`),
+        });
+
+        const result = await runDriveV2Pull({ ...h.options, profile: 'mobile' });
+
+        expect(result.maxActiveWriters).toBe(4);
+        expect(h.packReads).toBe(0);
+    });
+
     it('does not download or write items whose local content hash already matches Drive', async () => {
         const h = await createAdaptivePullHarness({
             remote: ['preset/same', 'preset/changed'],
