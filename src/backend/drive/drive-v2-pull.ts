@@ -92,7 +92,7 @@ export async function runDriveV2Pull(options: DriveV2PullOptions): Promise<Drive
         : null;
     const rangedPackNames = new Set<string>();
     let rangeReadRequests = 0;
-    const readChunk = options.source.readChunk;
+    const readChunk = options.source.readChunk?.bind(options.source);
     const rangeSource = {
         readChunk: async (...args: Parameters<DriveRangeSource['readChunk']>) => {
             if (!readChunk) throw new Error('Mobile pull requires Drive byte-range support');

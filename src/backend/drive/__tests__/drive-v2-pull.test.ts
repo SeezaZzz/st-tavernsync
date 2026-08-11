@@ -27,6 +27,23 @@ describe('Drive v2 extension-only Pull', () => {
         expect(h.chunkReads).toBe(10);
     });
 
+    it('preserves the range source method receiver in the mobile profile', async () => {
+        const h = await createAdaptivePullHarness({ remote: ['preset/one'] });
+        const harnessReadChunk = h.options.source.readChunk;
+        if (!harnessReadChunk) throw new Error('Harness range source is unavailable');
+        const source = {
+            ready: true,
+            readPack: h.options.source.readPack,
+            async readChunk(...args: Parameters<typeof harnessReadChunk>) {
+                if (!this.ready) throw new TypeError('range source receiver was lost');
+                return harnessReadChunk(...args);
+            },
+        };
+
+        await expect(runDriveV2Pull({ ...h.options, profile: 'mobile', source }))
+            .resolves.toMatchObject({ applied: 1 });
+    });
+
     it('does not download or write items whose local content hash already matches Drive', async () => {
         const h = await createAdaptivePullHarness({
             remote: ['preset/same', 'preset/changed'],
